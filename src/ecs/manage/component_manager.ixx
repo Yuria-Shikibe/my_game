@@ -27,37 +27,40 @@ namespace mo_yanxi::game::ecs{
 	private:
 		entity_id id_{};
 
-		void try_incr_ref() const noexcept{
-			if(id_ && !id_->is_expired()){
+		[[nodiscard]] static bool can_acquire_ref(const entity_id id) noexcept{
+			return id && id->get_state() == entity_state::valid;
+		}
+
+		void acquire(const entity_id id) noexcept{
+			if(can_acquire_ref(id)){
+				id_ = id;
 				id_->referenced_count.fetch_add(1, std::memory_order_relaxed);
+			}else{
+				id_ = nullptr;
 			}
 		}
 
-		void try_drop_ref() const noexcept{
+		void release() noexcept{
 			if(id_){
 				auto rst = id_->referenced_count.fetch_sub(1, std::memory_order_relaxed);
 				assert(rst != 0);
+				id_ = nullptr;
 			}
 		}
 
 	public:
 		[[nodiscard]] constexpr entity_ref() noexcept = default;
 
-		[[nodiscard]] explicit(false) entity_ref(entity_id entity_id) noexcept :
-			id_(entity_id){
-			try_incr_ref();
+		[[nodiscard]] explicit(false) entity_ref(entity_id entity_id) noexcept {
+			acquire(entity_id);
 		}
 
-		[[nodiscard]] explicit(false) entity_ref(entity& entity) noexcept :
-			id_(entity.id()){
-			if(entity){
-				id_->referenced_count.fetch_add(1, std::memory_order_relaxed);
-			}
+		[[nodiscard]] explicit(false) entity_ref(entity& entity) noexcept {
+			acquire(entity.id());
 		}
 
-		entity_ref(const entity_ref& other) noexcept
-			: id_{other.id_}{
-			try_incr_ref();
+		entity_ref(const entity_ref& other) noexcept {
+			acquire(other.id_);
 		}
 
 		entity_ref(entity_ref&& other) noexcept
@@ -66,43 +69,47 @@ namespace mo_yanxi::game::ecs{
 
 		entity_ref& operator=(const entity_ref& other) noexcept{
 			if(this == &other) return *this;
-			try_drop_ref();
-			id_ = other.id_;
-			try_incr_ref();
+			release();
+			acquire(other.id_);
 			return *this;
 		}
 
 		entity_ref& operator=(entity_id other) noexcept{
-			if(id_ == other) return *this;
-			try_drop_ref();
-			id_ = other;
-			try_incr_ref();
+			if(id_ == other){
+				if(!can_acquire_ref(id_)){
+					release();
+				}
+				return *this;
+			}
+
+			release();
+			acquire(other);
 			return *this;
 		}
 
 		entity_ref& operator=(std::nullptr_t other) noexcept{
-			try_drop_ref();
-			id_ = nullptr;
+			release();
 			return *this;
 		}
 
 		entity_ref& operator=(entity_ref&& other) noexcept{
 			if(this == &other) return *this;
-			try_drop_ref();
+			release();
 			id_ = std::exchange(other.id_, {});
 			return *this;
 		}
 
 		~entity_ref(){
-			try_drop_ref();
+			release();
 		}
 
-		constexpr entity* operator->() const noexcept{
+		entity* operator->() const noexcept{
+			assert(this->operator bool());
 			return id_;
 		}
 
-		constexpr entity& operator*() const noexcept{
-			assert(id_);
+		entity& operator*() const noexcept{
+			assert(this->operator bool());
 			return *id_;
 		}
 
@@ -114,43 +121,43 @@ namespace mo_yanxi::game::ecs{
 			this->operator=(entity);
 		}
 
-		explicit constexpr operator bool() const noexcept{
-			return id_ && *id_;
+		explicit operator bool() const noexcept{
+			return can_acquire_ref(id_);
 		}
 
 		[[nodiscard]] entity_id id() const noexcept{
-			return id_;
+			return can_acquire_ref(id_) ? id_ : nullptr;
 		}
 
 		template <typename C, typename T>
-		FORCE_INLINE constexpr T& operator->*(T C::* mptr) const noexcept{
-			assert(id_);
+		FORCE_INLINE T& operator->*(T C::* mptr) const noexcept{
+			assert(this->operator bool());
 			return id_->operator->*<C, T>(mptr);
 		}
 
 
 		template <typename T>
 			requires (std::is_member_function_pointer_v<T>)
-		FORCE_INLINE constexpr decltype(auto) operator->*(T mfptr) const noexcept{
-			assert(id_);
+		FORCE_INLINE decltype(auto) operator->*(T mfptr) const noexcept{
+			assert(this->operator bool());
 			return id_->operator->*(mfptr);
 		}
 
-		constexpr explicit(false) operator entity&() const noexcept{
-			assert(id_);
+		explicit(false) operator entity&() const noexcept{
+			assert(this->operator bool());
 			return *id_;
 		}
 
-		constexpr explicit(false) operator entity_id() const noexcept{
-			return id_;
+		explicit(false) operator entity_id() const noexcept{
+			return id();
 		}
 
 		/**
 		 * @brief drop the referenced entity if it is already erased
 		 */
-		constexpr bool drop_if_expired() noexcept{
+		bool drop_if_expired() noexcept{
 			if(id_ && id_->is_expired()){
-				this->operator=(nullptr);
+				release();
 				return true;
 			}
 			return false;
@@ -159,11 +166,11 @@ namespace mo_yanxi::game::ecs{
 		 * @brief drop the referenced entity if it is already erased
 		 */
 		template <bool check_inserted = false>
-		constexpr bool check_or_drop() noexcept{
+		bool check_or_drop() noexcept{
 			if(!id_)return false;
 			else {
 				if(id_->is_expired()){
-					this->operator=(nullptr);
+					release();
 					return false;
 				}
 
@@ -177,20 +184,22 @@ namespace mo_yanxi::game::ecs{
 			}
 		}
 
-		[[nodiscard]] constexpr bool is_expired() const noexcept{
+		[[nodiscard]] bool is_expired() const noexcept{
 			return id_ && id_->is_expired();
 		}
 
-		[[nodiscard]] constexpr bool is_valid() const noexcept{
-			return id_ && !id_->is_expired();
+		[[nodiscard]] bool is_valid() const noexcept{
+			return can_acquire_ref(id_);
 		}
 
-		constexpr friend bool operator==(const entity_ref& lhs, const entity_ref& rhs) noexcept = default;
-		constexpr friend bool operator==(const entity_ref& lhs, const entity_id eid) noexcept{
-			return lhs.id_ == eid;
+		friend bool operator==(const entity_ref& lhs, const entity_ref& rhs) noexcept{
+			return lhs.id() == rhs.id();
 		}
-		constexpr friend bool operator==(const entity_id eid, const entity_ref& rhs) noexcept{
-			return eid == rhs.id_;
+		friend bool operator==(const entity_ref& lhs, const entity_id eid) noexcept{
+			return lhs.id() == eid;
+		}
+		friend bool operator==(const entity_id eid, const entity_ref& rhs) noexcept{
+			return eid == rhs.id();
 		}
 	};
 
@@ -223,6 +232,10 @@ namespace mo_yanxi::game::ecs{
 	void archetype_base::erase(const entity_id entity){
 		entity->chunk_index_ = invalid_chunk_idx;
 		entity->archetype_ = nullptr;
+	}
+
+	void archetype_base::erase_at(const entity_id entity, std::size_t){
+		erase(entity);
 	}
 
 }

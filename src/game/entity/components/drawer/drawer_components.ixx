@@ -56,7 +56,7 @@ namespace mo_yanxi::game::ecs::drawer{
 		FORCE_INLINE void draw(const world::graphic_context& draw_ctx, part_transform current_trans) const{
 			using namespace graphic;
 
-			current_trans |= transform;
+			current_trans >>= transform;
 
 			draw_acquirer acquirer{draw_ctx.renderer().batch, region.image.get_cache()};
 			acquirer.proj.depth = current_trans.z_offset;
@@ -75,7 +75,7 @@ namespace mo_yanxi::game::ecs::drawer{
 		FORCE_INLINE void draw(const world::graphic_context& draw_ctx, part_transform current_trans) const{
 			using namespace graphic;
 
-			current_trans = transform | current_trans;
+			current_trans = transform >> current_trans;
 
 			draw_acquirer acquirer{draw_ctx.renderer().batch, draw::white_region};
 			acquirer.proj.depth = current_trans.z_offset;

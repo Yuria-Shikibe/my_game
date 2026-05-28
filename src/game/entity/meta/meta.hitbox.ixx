@@ -69,7 +69,7 @@ export namespace mo_yanxi::game::meta{
 
 		constexpr void apply() noexcept{
 			for (auto & component : components){
-				component.trans = trans.apply_inv_to(component.trans);
+				component.trans = component.trans << trans;
 			}
 			trans = {};
 		}

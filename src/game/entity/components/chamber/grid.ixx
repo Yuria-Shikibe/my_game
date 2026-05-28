@@ -314,16 +314,16 @@ namespace mo_yanxi::game::ecs::chamber{
 		template <math::quad_like T>
 		[[nodiscard]] constexpr T box_to_local (const T& brief) const noexcept{
 			return T{
-				get_transform().apply_inv_to(brief.v00()),
-				get_transform().apply_inv_to(brief.v10()),
-				get_transform().apply_inv_to(brief.v11()),
-				get_transform().apply_inv_to(brief.v01()),
+				brief.v00() << get_transform(),
+				brief.v10() << get_transform(),
+				brief.v11() << get_transform(),
+				brief.v01() << get_transform(),
 			};
 		}
 
 		template <std::integral T>
 		[[nodiscard]] constexpr math::vec2 tile_coord_to_global(math::vector2<T> coord) const noexcept{
-			return (coord.template as<decltype(tile_size_integral)>() * tile_size_integral).template as<float>() | transform;
+			return (coord.template as<decltype(tile_size_integral)>() * tile_size_integral).template as<float>() >> transform;
 		}
 
 		bool check_power_state_changed() noexcept{
@@ -343,10 +343,10 @@ namespace mo_yanxi::game::ecs::chamber{
 
 				const auto bound = local_grid.get_wrap_bound();
 				wrapper = math::rect_box<float>{
-					bound.vert_00() | trans,
-					bound.vert_10() | trans,
-					bound.vert_11() | trans,
-					bound.vert_01() | trans,
+					bound.vert_00() >> trans,
+					bound.vert_10() >> trans,
+					bound.vert_11() >> trans,
+					bound.vert_01() >> trans,
 				};
 			}
 		}
@@ -546,16 +546,16 @@ namespace mo_yanxi::game::ecs{
 		}
 
 		math::vec2 building::get_local_to_global(math::vec2 p) const noexcept{
-			return p | data().get_trans();
+			return p >> data().get_trans();
 		}
 
 		math::trans2 building::get_local_to_global_trans(math::vec2 p) const noexcept{
 			const auto trs = data().get_trans();
-			return {p | trs, trs.rot};
+			return {p >> trs, trs.rot};
 		}
 
 		math::trans2 building::get_local_to_global_trans(math::trans2 trans2) const noexcept{
-			return trans2 | data().get_trans();
+			return trans2 >> data().get_trans();
 		}
 
 		bool building_data::set_ideal_energy_acquisition(energy_acquisition acq){
@@ -589,7 +589,7 @@ namespace mo_yanxi::game::ecs{
 
 		math::trans2 building_data::get_trans() const noexcept{
 			auto trs = grid_->get_transform();
-			return {region().get_src().mul(tile_size_integral).as<float>() | trs, trs.rot};
+			return {region().get_src().mul(tile_size_integral).as<float>() >> trs, trs.rot};
 		}
 
 	}

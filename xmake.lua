@@ -68,4 +68,32 @@ target("ecs_entity_test")
     add_files("tests/ecs_entity_test/main.cpp")
 target_end()
 
+target("soa_vector_constexpr_test")
+    set_kind("binary")
+    set_extension(".exe")
+    set_languages("c++latest")
+    set_default(false)
+
+    add_ecs_entity_port_includes()
+
+    set_warnings("all", "pedantic")
+
+    add_files("src/ecs/support/soa_vector.ixx")
+    add_files("tests/soa_vector_constexpr_test/main.cpp")
+target_end()
+
+target("physics_core_test")
+    set_kind("binary")
+    set_extension(".exe")
+    set_languages("c++latest")
+    set_default(false)
+
+    add_deps("xrgui.default")
+
+    set_warnings("all", "pedantic")
+
+    add_files("src/game/physics/**.ixx")
+    add_files("tests/physics_core_test/main.cpp")
+target_end()
+
 

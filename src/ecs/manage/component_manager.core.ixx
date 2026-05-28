@@ -23,6 +23,7 @@ export module mo_yanxi.game.ecs.component.manage:entity;
 import :serializer;
 export import mo_yanxi.seq_chunk;
 import mo_yanxi.strided_span;
+import mo_yanxi.soa_vector;
 
 import mo_yanxi.game.srl;
 
@@ -50,6 +51,12 @@ namespace mo_yanxi::game::ecs{
 
 	export using entity_data_chunk_index = std::vector<int>::size_type;
 	export auto invalid_chunk_idx = std::numeric_limits<entity_data_chunk_index>::max();
+
+	export enum class entity_state : std::uint8_t{
+		staging,
+		valid,
+		expired,
+	};
 
 	export struct component_manager;
 
@@ -103,6 +110,23 @@ namespace mo_yanxi::game::ecs{
 
 
 
+		[[nodiscard]] constexpr archetype_base* get_archetype() const noexcept{
+			return archetype_;
+		}
+
+		[[nodiscard]] constexpr entity_state get_state() const noexcept{
+			if(get_archetype() == nullptr){
+				assert(chunk_index() == invalid_chunk_idx);
+				return entity_state::expired;
+			}
+
+			if(chunk_index() == invalid_chunk_idx){
+				return entity_state::staging;
+			}
+
+			return entity_state::valid;
+		}
+
 		/**
 		 * @brief Only valid when an entity has its data, i.e. an entity has been truly added.
 		 */
@@ -111,15 +135,11 @@ namespace mo_yanxi::game::ecs{
 		}
 
 		[[nodiscard]] constexpr bool is_expired() const noexcept{
-			return get_archetype() == nullptr;
+			return get_state() == entity_state::expired;
 		}
 
 		[[nodiscard]] constexpr bool is_inserted() const noexcept{
-			return chunk_index() != invalid_chunk_idx;
-		}
-
-		[[nodiscard]] constexpr archetype_base* get_archetype() const noexcept{
-			return archetype_;
+			return get_state() == entity_state::valid;
 		}
 
 		// void set_expired() const noexcept{
@@ -129,13 +149,13 @@ namespace mo_yanxi::game::ecs{
 
 		template <typename T>
 		[[nodiscard]] T* try_get() const noexcept{
-			assert(archetype_);
+			if(!is_inserted())return nullptr;
 			return archetype_->try_get_comp<T>(chunk_index_);
 		}
 
 		template <typename T>
 		[[nodiscard]] bool has() const noexcept{
-			assert(archetype_);
+			if(!is_inserted())return false;
 			return archetype_->has_type<T>();
 		}
 
@@ -143,7 +163,7 @@ namespace mo_yanxi::game::ecs{
 		[[nodiscard]] T& at() const noexcept{
 #ifdef COMP_AT_CHECK
 
-			if(!archetype_){
+			if(is_expired()){
 				std::println(std::cerr, "[FATAL ERROR] Illegal Access To Chunk<{}> on entity<{}> on empty archetype", name_of<T>(), type()->name());
 				std::terminate();
 			}
@@ -239,10 +259,48 @@ namespace mo_yanxi::game::ecs{
 		using components = tuple_to_seq_chunk_t<appended_tuple>;
 		static constexpr std::size_t chunk_comp_count = std::tuple_size_v<appended_tuple>;
 
-		static constexpr std::size_t single_chunk_size = sizeof(components);
+		using storage_type = decltype([]<std::size_t... I>(std::index_sequence<I...>){
+			return std::type_identity<soa_vector<
+				std::allocator<std::byte>,
+				std::tuple_element_t<I, appended_tuple>...>>{};
+		}(std::make_index_sequence<chunk_comp_count>{}))::type;
 
 		using base_to_derive_map = all_apply_to<tuple_cat_t, unary_apply_to_tuple_t<derive_map_of_trait, appended_tuple>>;
 		static constexpr std::size_t type_hash_map_size = std::tuple_size_v<base_to_derive_map>;
+
+		struct type_access{
+			type_identity_index type{};
+			void* (*get)(archetype*, std::size_t) noexcept{};
+			strided_span<std::byte> (*slice)(archetype*) noexcept{};
+
+			constexpr explicit operator bool() const noexcept{
+				return get != nullptr && slice != nullptr;
+			}
+		};
+
+		template <typename Requested, typename Stored>
+		static void* get_component_ptr(archetype* self, std::size_t idx) noexcept{
+			auto& stored = self->chunks.template get<Stored>(static_cast<typename storage_type::size_type>(idx));
+			return static_cast<void*>(static_cast<Requested*>(std::addressof(stored)));
+		}
+
+		template <typename Requested, typename Stored>
+		static strided_span<std::byte> get_component_slice(archetype* self) noexcept{
+			if(self->chunks.empty()){
+				return {};
+			}
+
+			auto* first = static_cast<Requested*>(
+				std::addressof(self->chunks.template get<Stored>(typename storage_type::size_type{})));
+			constexpr std::ptrdiff_t stride = std::same_as<Requested, Stored>
+				? std::ptrdiff_t{}
+				: static_cast<std::ptrdiff_t>(sizeof(Stored));
+			return {
+				reinterpret_cast<std::byte*>(first),
+				self->chunks.size(),
+				stride
+			};
+		}
 
 		struct serializer : archetype_serializer{
 			std::vector<typename trait::dump_chunk> buffer{};
@@ -257,10 +315,10 @@ namespace mo_yanxi::game::ecs{
 			}
 
 			void dump(const archetype& ty){
-				auto view = ty.get_chunk_view();
-				buffer.reserve(buffer.size() + view.size());
+				buffer.reserve(buffer.size() + ty.size());
 
-				for (const auto & seq_chunk : view){
+				for(std::size_t i = 0; i != ty.size(); ++i){
+					auto seq_chunk = ty.make_component_row(i);
 					buffer.push_back(trait::behavior::dump(seq_chunk));
 				}
 			}
@@ -329,32 +387,34 @@ namespace mo_yanxi::game::ecs{
 			void load(component_manager& target) const final;
 		};
 
-		using hashder_array_type = std::array<
-				type_index_to_convertor,
+		using type_access_array_type = std::array<
+				type_access,
 				std::bit_ceil(type_hash_map_size * 2)>;
 
 		//believe that this is faster than static
-		const hashder_array_type type_convertor_hash_map = [] {
-			hashder_array_type hash_array{};
+		const type_access_array_type type_access_hash_map = [] {
+			type_access_array_type hash_array{};
 
-			std::array<type_index_to_convertor, type_hash_map_size> temp{};
+			std::array<type_access, type_hash_map_size> temp{};
 			[&] <std::size_t ...Idx>(std::index_sequence<Idx...>){
-				((temp[Idx] = type_index_to_convertor{
+				((temp[Idx] = type_access{
 					unstable_type_identity_of<typename std::tuple_element_t<Idx, base_to_derive_map>::first_type>(),
-					type_comp_convert{
-					std::in_place_type<typename std::tuple_element_t<Idx, base_to_derive_map>::first_type>,
-					std::in_place_type<typename std::tuple_element_t<Idx, base_to_derive_map>::second_type>,
-					std::in_place_type<components>
-				}}), ...);
+					&get_component_ptr<
+						typename std::tuple_element_t<Idx, base_to_derive_map>::first_type,
+						typename std::tuple_element_t<Idx, base_to_derive_map>::second_type>,
+					&get_component_slice<
+						typename std::tuple_element_t<Idx, base_to_derive_map>::first_type,
+						typename std::tuple_element_t<Idx, base_to_derive_map>::second_type>
+				}), ...);
 			}(std::make_index_sequence<type_hash_map_size>{});
 
-			algo::make_hash(hash_array, temp, &type_index_to_convertor::type);
+			algo::make_hash(hash_array, temp, &type_access::type);
 
 			return hash_array;
 		}();
 
 	private:
-		std::vector<components> chunks{};
+		storage_type chunks{};
 
 		std::mutex staging_mutex_{};
 		plf::hive<components> staging{};
@@ -363,6 +423,8 @@ namespace mo_yanxi::game::ecs{
 		// std::vector<entity_id> staging_expires{};
 
 	protected:
+		using first_component = std::tuple_element_t<0, raw_tuple>;
+
 		template <typename ...Ts>
 		static auto get_unwrap_of(components& comp) noexcept{
 			return archetype_custom_behavior<raw_tuple>::template get_unwrap_of<Ts ...>(comp);
@@ -377,9 +439,104 @@ namespace mo_yanxi::game::ecs{
 			return archetype_custom_behavior<raw_tuple>::id_of_chunk(comp);
 		}
 
+		[[nodiscard]] chunk_meta& meta_at(const entity_data_chunk_index idx) noexcept{
+			return static_cast<chunk_meta&>(
+				chunks.template get<first_component>(static_cast<typename storage_type::size_type>(idx)));
+		}
+
+		[[nodiscard]] const chunk_meta& meta_at(const entity_data_chunk_index idx) const noexcept{
+			return static_cast<const chunk_meta&>(
+				chunks.template get<first_component>(static_cast<typename storage_type::size_type>(idx)));
+		}
+
+		[[nodiscard]] entity_id id_at(const entity_data_chunk_index idx) const noexcept{
+			return meta_at(idx).id();
+		}
+
+		template <std::size_t... I>
+		[[nodiscard]] components make_component_row(std::size_t idx, std::index_sequence<I...>) const{
+			const auto converted_idx = static_cast<typename storage_type::size_type>(idx);
+			return components{chunks.template get<std::tuple_element_t<I, raw_tuple>>(converted_idx)...};
+		}
+
+		[[nodiscard]] components make_component_row(std::size_t idx) const{
+			return make_component_row(idx, std::make_index_sequence<std::tuple_size_v<raw_tuple>>{});
+		}
+
+		template <std::size_t... I>
+		void assign_component_row(std::size_t idx, components&& row, std::index_sequence<I...>){
+			const auto converted_idx = static_cast<typename storage_type::size_type>(idx);
+			((chunks.template get<std::tuple_element_t<I, raw_tuple>>(converted_idx) =
+				std::move(get<std::tuple_element_t<I, raw_tuple>>(row))), ...);
+		}
+
+		void assign_component_row(std::size_t idx, components&& row){
+			assign_component_row(idx, std::move(row), std::make_index_sequence<std::tuple_size_v<raw_tuple>>{});
+		}
+
+		template <std::size_t... I>
+		void init_components_at(std::size_t idx, std::index_sequence<I...>){
+			const auto converted_idx = static_cast<typename storage_type::size_type>(idx);
+			chunk_meta& meta = meta_at(static_cast<entity_data_chunk_index>(idx));
+			(component_trait<std::tuple_element_t<I, raw_tuple>>::on_init(
+				meta,
+				chunks.template get<std::tuple_element_t<I, raw_tuple>>(converted_idx)), ...);
+		}
+
+		void init_components_at(std::size_t idx){
+			init_components_at(idx, std::make_index_sequence<std::tuple_size_v<raw_tuple>>{});
+		}
+
+		template <std::size_t... I>
+		void terminate_components_at(std::size_t idx, std::index_sequence<I...>){
+			const auto converted_idx = static_cast<typename storage_type::size_type>(idx);
+			chunk_meta& meta = meta_at(static_cast<entity_data_chunk_index>(idx));
+			(component_trait<std::tuple_element_t<I, raw_tuple>>::on_terminate(
+				meta,
+				chunks.template get<std::tuple_element_t<I, raw_tuple>>(converted_idx)), ...);
+		}
+
+		void terminate_components_at(std::size_t idx){
+			terminate_components_at(idx, std::make_index_sequence<std::tuple_size_v<raw_tuple>>{});
+		}
+
+		template <std::size_t... I>
+		void relocate_components_at(std::size_t idx, std::index_sequence<I...>){
+			const auto converted_idx = static_cast<typename storage_type::size_type>(idx);
+			chunk_meta& meta = meta_at(static_cast<entity_data_chunk_index>(idx));
+			(component_trait<std::tuple_element_t<I, raw_tuple>>::on_relocate(
+				meta,
+				chunks.template get<std::tuple_element_t<I, raw_tuple>>(converted_idx)), ...);
+		}
+
+		void relocate_components_at(std::size_t idx){
+			relocate_components_at(idx, std::make_index_sequence<std::tuple_size_v<raw_tuple>>{});
+		}
+
+		void relocate_row_at(std::size_t idx){
+			relocate_components_at(idx);
+
+			if constexpr (requires(components& row){ trait::on_relocate(row); }){
+				auto row = make_component_row(idx);
+				trait::on_relocate(row);
+				assign_component_row(idx, std::move(row));
+			}
+		}
+
+		struct relocate_hook{
+			archetype* self{};
+
+			void operator()(storage_type&, typename storage_type::size_type idx) const{
+				self->relocate_row_at(idx);
+			}
+		};
+
 	public:
-		[[nodiscard]] std::span<const components> get_chunk_view() const noexcept{
-			return chunks;
+
+		[[nodiscard]] std::span<const components> get_chunk_view() const noexcept = delete;
+
+		[[nodiscard]] std::span<first_component> first_column() noexcept{
+			return chunks.template column<first_component>();
 		}
 
 
@@ -387,11 +544,26 @@ namespace mo_yanxi::game::ecs{
 			return chunks.size();
 		}
 
+		[[nodiscard]] entity_id entity_at(const std::size_t idx) const noexcept final{
+			assert(idx < chunks.size());
+			return this->id_at(static_cast<entity_data_chunk_index>(idx));
+		}
+
 		void reserve(std::size_t sz) override{
-			chunks.reserve(sz);
+			if(sz > storage_type::max_size()){
+				throw std::length_error{"archetype capacity exceeds storage size_type"};
+			}
+			chunks.reserve(static_cast<typename storage_type::size_type>(sz), relocate_hook{this});
 		}
 
 	private:
+		template <std::size_t... I>
+		void emplace_component_row(components&& comp, std::index_sequence<I...>){
+			chunks.emplace_back_with_relocate(
+				relocate_hook{this},
+				std::move(get<std::tuple_element_t<I, raw_tuple>>(comp))...);
+		}
+
 		template <bool set_archetype = true>
 		std::size_t insert(components&& comp){
 			auto idx = chunks.size();
@@ -402,25 +574,21 @@ namespace mo_yanxi::game::ecs{
 			}
 
 			eid->chunk_index_ = idx;
-			auto last_cap = chunks.capacity();
-			components& added_comp = chunks.emplace_back(std::move(comp));
+			emplace_component_row(std::move(comp), std::make_index_sequence<std::tuple_size_v<raw_tuple>>{});
 			archetype_base::insert(eid);
 
+			init_components_at(idx);
 
-			[&] <std::size_t... I>(std::index_sequence<I...>){
-				(component_trait<std::tuple_element_t<I, raw_tuple>>::on_init(get<0>(added_comp), get<I>(added_comp)), ...);
-			}(std::make_index_sequence<std::tuple_size_v<raw_tuple>>());
-
-			trait::on_init(added_comp);
+			if constexpr (requires(components& row){ trait::on_init(row); }){
+				auto row = make_component_row(idx);
+				trait::on_init(row);
+				assign_component_row(idx, std::move(row));
+			}
 			eid->expire_staging_counter_ = trait::expire_counter;
-			this->init(added_comp);
-
-			if(last_cap != chunks.capacity()){
-				for(components& prev_comp : chunks | std::views::reverse | std::views::drop(1)){
-					[&] <std::size_t... I>(std::index_sequence<I...>){
-						(component_trait<std::tuple_element_t<I, raw_tuple>>::on_relocate(get<0>(prev_comp), get<I>(prev_comp)), ...);
-					}(std::make_index_sequence<std::tuple_size_v<raw_tuple>>());
-				}
+			{
+				auto row = make_component_row(idx);
+				this->init(row);
+				assign_component_row(idx, std::move(row));
 			}
 
 			return idx;
@@ -446,86 +614,95 @@ namespace mo_yanxi::game::ecs{
 		}
 
 		void erase(const entity_id e) final {
+			this->erase_at(e, e->chunk_index());
+		}
+
+		void erase_at(const entity_id e, const std::size_t old_idx) final {
 			auto chunk_size = chunks.size();
-			auto idx = e->chunk_index();
+			auto idx = static_cast<entity_data_chunk_index>(old_idx);
 
 			if(idx >= chunk_size){
 				throw std::runtime_error{"Invalid Erase"};
 			}
 
-			components& chunk = chunks[idx];
+			assert(this->id_at(idx) == e);
 
-			this->terminate(chunk);
-			trait::on_terminate(chunk);
-
-			[&] <std::size_t... I>(std::index_sequence<I...>){
-				(component_trait<std::tuple_element_t<I, raw_tuple>>::on_terminate(get<0>(chunk), get<I>(chunk)), ...);
-			}(std::make_index_sequence<std::tuple_size_v<raw_tuple>>());
-
-			if(idx == chunk_size - 1){
-				chunks.pop_back();
-			}else{
-				chunk = std::move(chunks.back());
-				chunks.pop_back();
-
-				this->id_of_chunk(chunk)->chunk_index_ = idx;
-
-				[&] <std::size_t... I>(std::index_sequence<I...>){
-					(component_trait<std::tuple_element_t<I, raw_tuple>>::on_relocate(get<0>(chunk), get<I>(chunk)), ...);
-				}(std::make_index_sequence<std::tuple_size_v<raw_tuple>>());
-
-				trait::on_relocate(chunk);
+			{
+				auto row = make_component_row(idx);
+				this->terminate(row);
+				assign_component_row(idx, std::move(row));
 			}
 
+			if constexpr (requires(components& row){ trait::on_terminate(row); }){
+				auto row = make_component_row(idx);
+				trait::on_terminate(row);
+				assign_component_row(idx, std::move(row));
+			}
+
+			terminate_components_at(idx);
+
+			chunks.erase_unstable(
+				static_cast<typename storage_type::size_type>(idx),
+				[this](storage_type&, typename storage_type::size_type moved_idx){
+					if(entity_id moved = this->id_at(moved_idx)){
+						switch(moved->get_state()){
+							case entity_state::valid:
+								moved->chunk_index_ = moved_idx;
+								break;
+							case entity_state::expired:
+								break;
+							case entity_state::staging:
+								assert(false);
+								std::unreachable();
+						}
+					}
+
+					this->relocate_row_at(moved_idx);
+				});
 
 			archetype_base::erase(e);
 		}
 
 		[[nodiscard]] bool has_type(type_identity_index type) const final{
-			return algo::access_hash(type_convertor_hash_map, type, &type_index_to_convertor::type, {}, [](const type_index_to_convertor& conv){
-				return !conv.convertor;
-			}) != type_convertor_hash_map.end();
+			return algo::access_hash(type_access_hash_map, type, &type_access::type, {}, [](const type_access& conv){
+				return !conv;
+			}) != type_access_hash_map.end();
 		}
 
 		void* get_chunk_partial_ptr(type_identity_index type, std::size_t idx) noexcept final {
-			if(auto itr = algo::access_hash(type_convertor_hash_map, type, &type_index_to_convertor::type, {}, [](const type_index_to_convertor& conv){
-				return !conv.convertor;
-			}); itr != type_convertor_hash_map.end()){
-				return itr->convertor.get(chunks[idx]);
+			if(auto itr = algo::access_hash(type_access_hash_map, type, &type_access::type, {}, [](const type_access& conv){
+				return !conv;
+			}); itr != type_access_hash_map.end()){
+				return itr->get(this, idx);
 			}else{
 				return nullptr;
 			}
 		}
 
 		strided_span<std::byte> get_staging_chunk_partial_slice(type_identity_index type) noexcept final{
-			if(const auto itr = algo::access_hash(type_convertor_hash_map, type, &type_index_to_convertor::type, {}, [](const type_index_to_convertor& conv){
-				return !conv.convertor;
-			}); itr != type_convertor_hash_map.end()){
-				if(chunks.empty()){
-					return {};
-				}else{
-					return {static_cast<std::byte*>(itr->convertor.get(chunks.data())), chunks.size(), single_chunk_size};
-				}
-
+			if(const auto itr = algo::access_hash(type_access_hash_map, type, &type_access::type, {}, [](const type_access& conv){
+				return !conv;
+			}); itr != type_access_hash_map.end()){
+				return itr->slice(this);
 			}else{
 				return {};
 			}
 		}
 
-		[[nodiscard]] auto& at(entity_data_chunk_index idx) const noexcept{
-			return chunks.at(idx);
+		[[nodiscard]] auto at(entity_data_chunk_index idx) const noexcept{
+			return chunks[static_cast<typename storage_type::size_type>(idx)];
 		}
 
-		[[nodiscard]] auto& at(entity_data_chunk_index idx) noexcept{
-			return chunks.at(idx);
+		[[nodiscard]] auto at(entity_data_chunk_index idx) noexcept{
+			return chunks[static_cast<typename storage_type::size_type>(idx)];
 		}
 
-		[[nodiscard]] auto& operator[](entity_data_chunk_index idx) const noexcept{
-			return chunks[idx];
+		[[nodiscard]] auto operator[](entity_data_chunk_index idx) const noexcept{
+			return chunks[static_cast<typename storage_type::size_type>(idx)];
 		}
 
-		[[nodiscard]] auto& operator[](entity_data_chunk_index idx) noexcept{
-			return chunks[idx];
+		[[nodiscard]] auto operator[](entity_data_chunk_index idx) noexcept{
+			return chunks[static_cast<typename storage_type::size_type>(idx)];
 		}
 
 		components& push_staging(const entity_id e, components&& comp){
@@ -538,19 +715,35 @@ namespace mo_yanxi::game::ecs{
 			return *staging.insert(std::move(comp));
 		}
 
-		void dump_staging() final {
-			auto sz = chunks.size() + staging.size();
-			if(sz > chunks.capacity()){
-				chunks.reserve(sz);
-				for(components& prev_comp : chunks){
-					[&] <std::size_t... I>(std::index_sequence<I...>){
-						(component_trait<std::tuple_element_t<I, raw_tuple>>::on_relocate(get<0>(prev_comp), get<I>(prev_comp)), ...);
-					}(std::make_index_sequence<std::tuple_size_v<raw_tuple>>());
+		bool erase_staging(const entity_id e) noexcept final {
+			assert(e);
+
+			std::lock_guard _{staging_mutex_};
+			for(auto& data : staging){
+				if(this->id_of_chunk(data) == e){
+					const auto itr = staging.get_iterator(std::addressof(data));
+					assert(itr != staging.end());
+					staging.erase(itr);
+					return true;
 				}
 			}
 
+			return false;
+		}
+
+		void dump_staging() final {
+			auto sz = chunks.size() + staging.size();
+			if(sz > chunks.capacity()){
+				if(sz > storage_type::max_size()){
+					throw std::length_error{"archetype capacity exceeds storage size_type"};
+				}
+				chunks.reserve(static_cast<typename storage_type::size_type>(sz), relocate_hook{this});
+			}
+
 			for (auto && data : staging){
-				this->insert<false>(std::move(data));
+				if(const entity_id eid = this->id_of_chunk(data); eid && eid->get_state() == entity_state::staging){
+					this->insert<false>(std::move(data));
+				}
 			}
 
 			staging.clear();
@@ -581,15 +774,31 @@ namespace mo_yanxi::game::ecs{
 
 	public:
 		template <typename T>
+			requires (contained_in<T, appended_tuple>)
+		[[nodiscard]] std::span<T> exact_slice() noexcept{
+			return chunks.template column<T>();
+		}
+
+		template <typename T>
+			requires (contained_in<T, appended_tuple>)
+		[[nodiscard]] std::span<const T> exact_slice() const noexcept{
+			return chunks.template column<T>();
+		}
+
+		template <typename T>
 		[[nodiscard]] strided_span<T> slice() noexcept{
 			constexpr auto idx = tuple_match_first_v<find_if_first_equal, base_to_derive_map, T>;
 			if constexpr (idx != std::tuple_size_v<base_to_derive_map>){
+				using stored_type = typename std::tuple_element_t<idx, base_to_derive_map>::second_type;
+				constexpr std::ptrdiff_t stride = std::same_as<T, stored_type>
+					? std::ptrdiff_t{}
+					: static_cast<std::ptrdiff_t>(sizeof(stored_type));
 				if(chunks.empty()){
-					return {nullptr, 0, single_chunk_size};
+					return {nullptr, 0, stride};
 				}else{
 					return strided_span<T>{
-						static_cast<T*>(std::addressof(get<typename std::tuple_element_t<idx, base_to_derive_map>::second_type>(chunks.front()))),
-						chunks.size(), single_chunk_size
+						static_cast<T*>(std::addressof(chunks.template get<stored_type>(typename storage_type::size_type{}))),
+						chunks.size(), stride
 					};
 				}
 			}else{
@@ -601,12 +810,16 @@ namespace mo_yanxi::game::ecs{
 		[[nodiscard]] strided_span<const T> slice() const noexcept{
 			constexpr auto idx = tuple_match_first_v<find_if_first_equal, base_to_derive_map, T>;
 			if constexpr (idx != std::tuple_size_v<base_to_derive_map>){
+				using stored_type = typename std::tuple_element_t<idx, base_to_derive_map>::second_type;
+				constexpr std::ptrdiff_t stride = std::same_as<T, stored_type>
+					? std::ptrdiff_t{}
+					: static_cast<std::ptrdiff_t>(sizeof(stored_type));
 				if(chunks.empty()){
-					return {nullptr, 0, single_chunk_size};
+					return {nullptr, 0, stride};
 				}else{
 					return strided_span<const T>{
-						static_cast<const T*>(std::addressof(get<typename std::tuple_element_t<idx, base_to_derive_map>::second_type>(chunks.front()))),
-						chunks.size(), single_chunk_size
+						static_cast<const T*>(std::addressof(chunks.template get<stored_type>(typename storage_type::size_type{}))),
+						chunks.size(), stride
 					};
 				}
 			}else{
@@ -622,20 +835,22 @@ namespace mo_yanxi::game::ecs{
 
 	template <typename Tuple, typename T> requires (contained_in<T, Tuple>)
 	T& entity::unchecked_get() const{
-		assert(archetype_);
+		assert(is_inserted());
 		auto& aty = CHECKED_STATIC_CAST(archetype<Tuple>&)(*archetype_);
 		return aty.template slice<T>()[chunk_index_];
 	}
 
 	template <typename Tuple>
 	tuple_to_comp_t<Tuple>& entity::unchecked_get() const{
-		assert(archetype_);
-		auto& aty = CHECKED_STATIC_CAST(archetype<Tuple>&)(*archetype_);
-		return aty[chunk_index_];
+		assert(is_inserted());
+		static_assert(!std::same_as<Tuple, Tuple>,
+			"Full entity chunk references are not available for SoA archetype storage; use component access instead.");
+		std::unreachable();
 	}
 
 	template <typename Tuple, typename T>
 	T* entity::get() const noexcept{
+		if(!is_inserted())return nullptr;
 		static constexpr type_identity_index idx = unstable_type_identity_of<Tuple>();
 		if(idx != type())return nullptr;
 
@@ -644,10 +859,13 @@ namespace mo_yanxi::game::ecs{
 
 	template <typename Tuple>
 	tuple_to_comp_t<Tuple>* entity::get() const noexcept{
+		if(!is_inserted())return nullptr;
 		static constexpr type_identity_index idx = unstable_type_identity_of<Tuple>();
 		if(idx != type())return nullptr;
 
-		return &unchecked_get<Tuple>();
+		static_assert(!std::same_as<Tuple, Tuple>,
+			"Full entity chunk pointers are not available for SoA archetype storage; use component access instead.");
+		return nullptr;
 	}
 
 	export
@@ -721,8 +939,18 @@ namespace mo_yanxi::game::ecs{
 			}
 		};
 
-		pointer_hash_map<entity_id, int> to_expire{};
-		std::vector<entity_id> expired{};
+		struct expire_ticket{
+			entity_id entity{};
+			archetype_base* archetype{};
+			entity_data_chunk_index chunk_index{invalid_chunk_idx};
+
+			[[nodiscard]] constexpr bool has_chunk() const noexcept{
+				return archetype != nullptr && chunk_index != invalid_chunk_idx;
+			}
+		};
+
+		pointer_hash_map<entity_id, expire_ticket> to_expire{};
+		std::vector<expire_ticket> expired{};
 
 		plf::hive<entity> entities{};
 		archetype_map_type archetypes{};
@@ -737,6 +965,70 @@ namespace mo_yanxi::game::ecs{
 
 		float update_delta{};
 		unsigned clock{};
+
+		bool update_pending_expire_chunk(
+			const entity_id entity,
+			archetype_base* archetype,
+			const entity_data_chunk_index chunk_index
+		) noexcept{
+			if(!entity)return false;
+
+			if(auto itr = to_expire.find(entity); itr != to_expire.end()){
+				if(itr->second.has_chunk()){
+					itr->second.archetype = archetype;
+					itr->second.chunk_index = chunk_index;
+					return true;
+				}
+				return false;
+			}
+
+			for(auto& ticket : expired){
+				if(ticket.entity == entity && ticket.has_chunk()){
+					ticket.archetype = archetype;
+					ticket.chunk_index = chunk_index;
+					return true;
+				}
+			}
+
+			return false;
+		}
+
+		bool mark_expired_unlocked(entity_id entity){
+			if(!entity)return false;
+
+			switch(entity->get_state()){
+				case entity_state::expired:
+					return false;
+				case entity_state::staging:{
+					archetype_base* archetype = entity->get_archetype();
+					auto [_, inserted] = to_expire.try_emplace(entity, expire_ticket{entity});
+					if(!inserted)return false;
+
+					if(archetype){
+						(void)archetype->erase_staging(entity);
+					}
+
+					entity->chunk_index_ = invalid_chunk_idx;
+					entity->archetype_ = nullptr;
+					return true;
+				}
+				case entity_state::valid:{
+					expire_ticket ticket{
+						entity,
+						entity->get_archetype(),
+						entity->chunk_index()
+					};
+					auto [_, inserted] = to_expire.try_emplace(entity, ticket);
+					if(!inserted)return false;
+
+					entity->chunk_index_ = invalid_chunk_idx;
+					entity->archetype_ = nullptr;
+					return true;
+				}
+			}
+
+			std::unreachable();
+		}
 
 	public:
 		void update_update_delta(float dlt) noexcept{
@@ -791,27 +1083,9 @@ namespace mo_yanxi::game::ecs{
 		 */
 		template <typename Tuple>
 		auto& create_entity_deferred(tuple_to_comp_t<Tuple>&& comps){
-			static constexpr type_identity_index idx = unstable_type_identity_of<Tuple>();
-
+			auto& a = add_archetype<Tuple>();
 			entity* ent = acquire_entity<Tuple>();
-
-			if(auto itr = archetypes.find(idx); itr != archetypes.end()){
-				auto& a = static_cast<archetype<Tuple>&>(*itr->second);
-				return a.push_staging(ent->id(), std::move(comps));
-			}else{
-				chunk_meta& meta = get<chunk_meta>(comps);
-				meta.eid_ = ent;
-				auto ptr = std::make_unique<staging_add<Tuple>>(std::move(comps));
-				auto& comp = ptr->comp;
-
-				{
-					std::lock_guard _{entity_staging_add_mutex_};
-					staging_adds.push_back(std::move(ptr));
-				}
-
-				return comp;
-			}
-
+			return a.push_staging(ent->id(), std::move(comps));
 		}
 
 		template <typename Tuple, std::derived_from<archetype<Tuple>> Archetype = archetype<Tuple>, typename ... Args>
@@ -874,13 +1148,13 @@ namespace mo_yanxi::game::ecs{
 		void mark_expired_all(){
 			std::lock_guard _{entity_expire_mutex_};
 			for (auto & entity : entities){
-				to_expire.try_emplace(std::addressof(entity));
+				(void)mark_expired_unlocked(std::addressof(entity));
 			}
 		}
 
 		bool mark_expired(entity_id entity){
 			std::lock_guard _{entity_expire_mutex_};
-			return to_expire.try_emplace(entity).second;
+			return mark_expired_unlocked(entity);
 		}
 
 		void do_deferred(){
@@ -916,26 +1190,54 @@ namespace mo_yanxi::game::ecs{
 
 
 			//TODO destroy expiration notify/check
-			for(const auto& [entity, _] : to_expire){
-				expired.push_back(entity);
+			for(const auto& [entity, ticket] : to_expire){
+				expired.push_back(ticket);
 			}
 			to_expire.clear();
 
-			modifiable_erase_if(expired, [this](entity_id e){
+			for(expire_ticket& ticket : expired){
+				entity_id e = ticket.entity;
+				if(!e)continue;
+
 				if(e->expire_staging_counter_){
 					--e->expire_staging_counter_;
 				}else{
-					if(e->archetype_){
-						e->get_archetype()->erase(e);
-					}else if(e->get_ref_count() == 0){
+					if(ticket.has_chunk()){
+						archetype_base* archetype = ticket.archetype;
+						const entity_data_chunk_index old_index = ticket.chunk_index;
+
+						assert(archetype);
+						assert(old_index < archetype->size());
+
+						entity_id moved = nullptr;
+						const auto last_index = static_cast<entity_data_chunk_index>(archetype->size() - 1);
+						if(old_index != last_index){
+							moved = archetype->entity_at(last_index);
+						}
+
+						archetype->erase_at(e, old_index);
+
+						if(moved && moved != e && moved->get_state() == entity_state::expired){
+							const bool updated = update_pending_expire_chunk(moved, archetype, old_index);
+							assert(updated);
+						}
+
+						ticket.archetype = nullptr;
+						ticket.chunk_index = invalid_chunk_idx;
+					}
+
+					if(e->get_ref_count() == 0){
 						const auto itr = entities.get_iterator(e);
 						if(itr != entities.end())entities.erase(itr);
-						return true;
+						ticket.entity = nullptr;
 					}
 
 				}
 
-				return false;
+			}
+
+			std::erase_if(expired, [](const expire_ticket& ticket){
+				return ticket.entity == nullptr;
 			});
 		}
 
@@ -945,7 +1247,7 @@ namespace mo_yanxi::game::ecs{
 
 			for (auto& entity : entities){
 				if(entity.get_ref_count() == 0){
-					to_expire.try_emplace(entity.id());
+					(void)mark_expired_unlocked(entity.id());
 				}
 			}
 		}
@@ -1027,18 +1329,18 @@ namespace mo_yanxi::game::ecs{
 
 		template <typename Tuple>
 		tuple_to_seq_chunk_t<Tuple>* get_entity_full_chunk(const entity& entity) const noexcept{
-			if(entity.is_expired())return nullptr;
+			if(!entity.is_inserted())return nullptr;
 			static constexpr type_identity_index idx = unstable_type_identity_of<Tuple>();
 			if(idx != entity.type())return nullptr;
-			//TODO should this a must event? so at() directly?
-			archetype<Tuple>& aty = static_cast<archetype<Tuple>&>(entity.get_archetype());
-			return std::addressof(aty[entity.chunk_index()]);
+			static_assert(!std::same_as<Tuple, Tuple>,
+				"Full entity chunk pointers are not available for SoA archetype storage; use get_entity_partial_chunk instead.");
+			return nullptr;
 		}
 
 		template <typename T>
 		T* get_entity_partial_chunk(const entity_id entity) const noexcept{
 			assert(entity);
-			if(entity->is_expired())return nullptr;
+			if(!entity->is_inserted())return nullptr;
 
 			static constexpr type_identity_index idx = unstable_type_identity_of<T>();
 			if(auto slices_itr = type_to_archetype.find(idx); slices_itr != type_to_archetype.end()){

@@ -360,11 +360,11 @@ namespace mo_yanxi::game::ecs{
 
 			[[nodiscard]] math::trans2 get_trans_offseted(math::vec2 scale) const noexcept{
 				const auto trs = get_trans();
-				return {real_extent() * scale | trs, trs.rot};
+				return {real_extent() * scale >> trs, trs.rot};
 			}
 
 			[[nodiscard]] math::vec2 get_pos_offseted(math::vec2 scale) const noexcept{
-				return real_extent() * scale | get_trans();
+				return real_extent() * scale >> get_trans();
 			}
 
 			[[nodiscard]] math::vec2 get_local_pos_offseted(const math::vec2 scale) const noexcept{

@@ -100,7 +100,7 @@ namespace mo_yanxi::game::ecs{
 						cache_.projectile_speed,
 						meta.shoot_type.offset.trunk.x)){
 
-					const auto tgt_pos = pos.apply_inv_to(math::fma(motion.vel.vec, rst, motion.pos()));
+					const auto tgt_pos = math::fma(motion.vel.vec, rst, motion.pos()) << pos;
 					const auto ang = tgt_pos.angle_rad();
 					return std::optional{ang};
 				}

@@ -217,7 +217,7 @@ namespace mo_yanxi::game::meta::turret{
 			ecs::drawer::part_transform current_trans,
 			const turret_param& param
 		) const{
-			current_trans = ecs::drawer::part_transform{sub_transform(param), 0} | transform | current_trans;
+			current_trans = ecs::drawer::part_transform{sub_transform(param), 0} >> transform >> current_trans;
 			ecs::drawer::draw_acquirer acquirer{draw_ctx.renderer().batch};
 
 			base_component.draw_impl(acquirer, current_trans);

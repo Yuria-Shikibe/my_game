@@ -261,7 +261,7 @@ namespace mo_yanxi::game{
 			//TODO Simple object [box == 1] Optimization (for bullets mainly)
 
 			for(auto& boxData : components){
-				boxData.box.update(boxData.trans | trans);
+				boxData.box.update(boxData.trans >> trans);
 
 				const std::array verts{
 					boxData.box[0].rotate(cos, sin),

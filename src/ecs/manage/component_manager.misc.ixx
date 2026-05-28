@@ -117,6 +117,14 @@ namespace mo_yanxi::game::ecs{
 
 		virtual void erase(const entity_id entity);
 
+		virtual void erase_at(const entity_id entity, std::size_t idx);
+
+		virtual bool erase_staging(const entity_id entity) noexcept{
+			return false;
+		}
+
+		[[nodiscard]] virtual entity_id entity_at(std::size_t idx) const noexcept = 0;
+
 	protected:
 
 		virtual void* get_chunk_partial_ptr(type_identity_index type, std::size_t idx) noexcept = 0;

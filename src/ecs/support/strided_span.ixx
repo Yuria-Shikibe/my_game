@@ -107,7 +107,7 @@ namespace mo_yanxi{
 	export
 	template <class Ty, std::ptrdiff_t Stride = dynamic_in_byte>
 	struct strided_span_iterator {
-		using iterator_concept  = std::contiguous_iterator_tag;
+		using iterator_concept  = std::random_access_iterator_tag;
 		using iterator_category = std::random_access_iterator_tag;
 		using value_type        = std::remove_cv_t<Ty>;
 		using difference_type   = std::ptrdiff_t;
@@ -391,9 +391,10 @@ namespace mo_yanxi{
 		using ptr_internal = std::byte*;
 
 	public:
-		using iterator_concept  = std::contiguous_iterator_tag;
+		using iterator_concept  = std::random_access_iterator_tag;
 		using iterator_category = std::random_access_iterator_tag;
 		using value_type        = unary_apply_to_tuple_t<std::add_lvalue_reference_t, tuple_const_to_inner_t<ValueTuple>>;
+		static constexpr auto tuple_sz = std::tuple_size_v<value_type>;
 		using difference_type   = std::ptrdiff_t;
 		using pointer           = value_type*;
 		using reference         = value_type&;
@@ -401,13 +402,15 @@ namespace mo_yanxi{
 		[[nodiscard]] constexpr value_type operator*() const noexcept {
 			return [this] <std::size_t ...Idx>(std::index_sequence<Idx...>) {
 				return value_type{reinterpret_cast<std::tuple_element_t<Idx, value_type>>(
-					*detail::ptr_offset(ptr, offsets_[Idx])
+					*ptrs_[Idx]
 				) ...};
 			}(std::make_index_sequence<std::tuple_size_v<value_type>>{});
 		}
 
 		constexpr strided_multi_span_iterator& operator++() noexcept {
-			ptr = detail::ptr_offset(ptr, stride);
+			[&]<std::size_t... Idx>(std::index_sequence<Idx...>){
+				((ptrs_[Idx] = detail::ptr_offset(ptrs_[Idx], strides_[Idx])), ...);
+			}(std::make_index_sequence<tuple_sz>{});
 
 			return *this;
 		}
@@ -419,7 +422,9 @@ namespace mo_yanxi{
 		}
 
 		constexpr strided_multi_span_iterator& operator--() noexcept {
-			ptr = detail::ptr_offset(ptr, -stride);
+			[&]<std::size_t... Idx>(std::index_sequence<Idx...>){
+				((ptrs_[Idx] = detail::ptr_offset(ptrs_[Idx], -strides_[Idx])), ...);
+			}(std::make_index_sequence<tuple_sz>{});
 
 			return *this;
 		}
@@ -431,8 +436,9 @@ namespace mo_yanxi{
 		}
 
 		constexpr strided_multi_span_iterator& operator+=(const difference_type off) noexcept {
-			ptr = detail::ptr_offset(ptr, off * stride);
-
+			[&]<std::size_t... Idx>(std::index_sequence<Idx...>){
+				((ptrs_[Idx] = detail::ptr_offset(ptrs_[Idx], off * strides_[Idx])), ...);
+			}(std::make_index_sequence<tuple_sz>{});
 
 			return *this;
 		}
@@ -449,8 +455,9 @@ namespace mo_yanxi{
 		}
 
 		constexpr strided_multi_span_iterator& operator-=(const difference_type off) noexcept {
-			ptr = detail::ptr_offset(ptr, -off * stride);
-
+			[&]<std::size_t... Idx>(std::index_sequence<Idx...>){
+				((ptrs_[Idx] = detail::ptr_offset(ptrs_[Idx], -off * strides_[Idx])), ...);
+			}(std::make_index_sequence<tuple_sz>{});
 
 			return *this;
 		}
@@ -462,7 +469,7 @@ namespace mo_yanxi{
 		}
 
 		[[nodiscard]] constexpr difference_type operator-(const strided_multi_span_iterator& right) const noexcept {
-			return detail::ptr_distance(ptr, right.ptr) / stride;
+			return detail::ptr_distance(ptrs_[0], right.ptrs_[0]) / strides_[0];
 		}
 
 		[[nodiscard]] constexpr reference operator[](const difference_type off) const noexcept {
@@ -470,30 +477,25 @@ namespace mo_yanxi{
 		}
 
 		[[nodiscard]] constexpr bool operator==(const strided_multi_span_iterator& right) const noexcept {
-			return ptr == right.ptr;
+			return ptrs_[0] == right.ptrs_[0];
 		}
 
 		[[nodiscard]] constexpr auto operator<=>(const strided_multi_span_iterator& right) const noexcept {
-			return ptr <=> right.ptr;
+			return ptrs_[0] <=> right.ptrs_[0];
 		}
 
 		[[nodiscard]] strided_multi_span_iterator() = default;
 
-		[[nodiscard]] explicit(false) strided_multi_span_iterator(ptr_internal ptr) : ptr(ptr){}
-
 		[[nodiscard]] explicit(false) strided_multi_span_iterator(
-			ptr_internal ptr,
-			std::array<std::ptrdiff_t, std::tuple_size_v<ValueTuple>> offs,
-			std::ptrdiff_t stride)
-			: ptr(ptr),
-			  offsets_(offs),
-			  stride(stride){
+			std::array<ptr_internal, tuple_sz> ptrs,
+			std::array<std::ptrdiff_t, tuple_sz> strides)
+			: ptrs_(ptrs),
+			  strides_(strides){
 		}
 
 	private:
-		ptr_internal ptr = nullptr;
-		std::array<std::ptrdiff_t, std::tuple_size_v<ValueTuple>> offsets_;
-		std::ptrdiff_t stride = 0;
+		std::array<ptr_internal, tuple_sz> ptrs_{};
+		std::array<std::ptrdiff_t, tuple_sz> strides_{};
 	};
 
 	export
@@ -502,10 +504,9 @@ namespace mo_yanxi{
 	private:
 		static constexpr auto tuple_sz = std::tuple_size_v<ValueTuple>;
 		static_assert(tuple_sz != 0);
-		std::byte* data_;
-		std::array<std::ptrdiff_t, std::tuple_size_v<ValueTuple>> offsets_;
-		std::size_t size_;
-		std::ptrdiff_t stride_;
+		std::array<std::byte*, tuple_sz> data_{};
+		std::array<std::ptrdiff_t, tuple_sz> strides_{};
+		std::size_t size_{};
 
 	public:
 		using value_type        = unary_apply_to_tuple_t<std::add_lvalue_reference_t, tuple_const_to_inner_t<ValueTuple>>;
@@ -525,19 +526,10 @@ namespace mo_yanxi{
 		template <typename ...Ty>
 		[[nodiscard]] constexpr strided_multi_span(strided_span<Ty> ...spans) noexcept
 			:
-			data_(detail::min_address(
-					const_cast<std::byte*>(reinterpret_cast<const std::byte*>(spans.data())) ...
-				)),
-			offsets_{
-				(detail::ptr_distance(const_cast<std::byte*>(reinterpret_cast<const std::byte*>(spans.data())), data_)) ...
-			},
-			size_(std::min(std::initializer_list<std::size_t>{spans.size() ...})),
-			stride_((spans.stride(), ...))
+			data_{const_cast<std::byte*>(reinterpret_cast<const std::byte*>(spans.data())) ...},
+			strides_{(spans.stride() ? spans.stride() : static_cast<std::ptrdiff_t>(sizeof(Ty))) ...},
+			size_(std::min(std::initializer_list<std::size_t>{spans.size() ...}))
 		{
-			if(((stride_ != spans.stride()) || ...)){
-				std::terminate();
-			}
-
 
 		}
 
@@ -550,7 +542,7 @@ namespace mo_yanxi{
 		value_type operator[](std::size_t idx) const noexcept{
 			return [&, this] <std::size_t ...Idx>(std::index_sequence<Idx...>) {
 				return value_type{reinterpret_cast<std::tuple_element_t<Idx, value_type>>(
-					*detail::ptr_offset(data_, static_cast<difference_type>(idx) * stride_ + offsets_[Idx])
+					*detail::ptr_offset(data_[Idx], static_cast<difference_type>(idx) * strides_[Idx])
 				) ...};
 			}(std::make_index_sequence<std::tuple_size_v<value_type>>{});
 		}
@@ -560,11 +552,15 @@ namespace mo_yanxi{
 		}
 
 		[[nodiscard]] iterator begin() const noexcept{
-			return iterator{data_, offsets_, stride_};
+			return iterator{data_, strides_};
 		}
 
 		[[nodiscard]] iterator end() const noexcept{
-			return iterator{detail::ptr_offset(data_, static_cast<difference_type>(size_) * stride_), offsets_, stride_};
+			auto ends = data_;
+			[&]<std::size_t... Idx>(std::index_sequence<Idx...>){
+				((ends[Idx] = detail::ptr_offset(ends[Idx], static_cast<difference_type>(size_) * strides_[Idx])), ...);
+			}(std::make_index_sequence<tuple_sz>{});
+			return iterator{ends, strides_};
 		}
 
 		[[nodiscard]] constexpr const_iterator cbegin() const noexcept {
