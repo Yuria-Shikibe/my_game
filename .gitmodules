@@ -1,0 +1,3 @@
+[submodule "external/xrgui"]
+	path = external/xrgui
+	url = https://github.com/Yuria-Shikibe/xrgui.git
