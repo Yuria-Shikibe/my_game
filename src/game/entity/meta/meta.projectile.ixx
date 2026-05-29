@@ -4,7 +4,7 @@
 
 export module mo_yanxi.game.meta.projectile;
 
-export import mo_yanxi.game.meta.hitbox;
+export import mo_yanxi.game.physics;
 export import mo_yanxi.game.meta.graphic;
 export import mo_yanxi.game.ecs.component.physical_property;
 export import mo_yanxi.game.ecs.component.damage;
@@ -25,8 +25,9 @@ namespace mo_yanxi::game::meta{
 
 	export
 	struct projectile{
-		meta::hitbox hitbox{};
-		ecs::physical_rigid rigid{};
+		physics::collision_shape collision_shape{};
+		physics::rigid_body rigid{physics::rigid_body::make_dynamic(1.f)};
+		physics::collision_filter filter{};
 		ecs::damage_group damage{};
 
 		float lifetime{};

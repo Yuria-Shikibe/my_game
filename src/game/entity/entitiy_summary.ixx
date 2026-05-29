@@ -2,11 +2,10 @@ module;
 
 export module mo_yanxi.game.ecs.entitiy_decleration;
 
-export import mo_yanxi.game.ecs.component.manifold;
 export import mo_yanxi.game.ecs.component.chamber;
 export import mo_yanxi.game.ecs.component.chamber.ui_builder;
 export import mo_yanxi.game.ecs.component.projectile.manifold;
-export import mo_yanxi.game.ecs.component.hitbox;
+export import mo_yanxi.game.ecs.component.physics;
 export import mo_yanxi.game.ecs.component.faction;
 export import mo_yanxi.game.ecs.component.command;
 
@@ -21,8 +20,8 @@ namespace mo_yanxi::game::ecs{
 		export using grid_entity = std::tuple<
 			chunk_meta,
 			mech_motion,
-			manifold,
-			physical_rigid,
+			collider,
+			physics_body,
 			faction_data,
 			move_command,
 			chamber::chamber_manifold,
@@ -32,8 +31,8 @@ namespace mo_yanxi::game::ecs{
 		export using projectile = std::tuple<
 			chunk_meta,
 			mech_motion,
-			manifold,
-			physical_rigid,
+			collider,
+			physics_body,
 			faction_data,
 			projectile_manifold,
 			projectile_drawer,
@@ -55,9 +54,8 @@ namespace mo_yanxi::game::ecs{
 		}
 
 		static void on_init(value_type& comps){
-			auto [motion, mf] = get_unwrap_of<mech_motion, manifold>(comps);
-			mf.hitbox.set_trans_unchecked(motion.trans);
-			mf.hitbox.update(motion.trans);
+			auto [motion, col] = get_unwrap_of<mech_motion, collider>(comps);
+			(void)col;
 			comps.chamber::chamber_manifold::update_transform(motion.trans);
 
 			comps.hit_point = hit_point{
@@ -67,9 +65,6 @@ namespace mo_yanxi::game::ecs{
 				10000,
 			};
 
-			if(comps.get<physical_rigid>().rotational_inertia < 0){
-				comps.get<physical_rigid>().rotational_inertia = mf.hitbox.get_rotational_inertia(comps.get<physical_rigid>().inertial_mass);
-			}
 			// comps.faction = faction_0;
 
 			// auto dump_ = dump(comps);
@@ -83,10 +78,9 @@ namespace mo_yanxi::game::ecs{
 		static void on_init(value_type& comps){
 
 
-			auto [motion, mf, dmg] = get_unwrap_of<mech_motion, manifold, projectile_manifold>(comps);
-			mf.hitbox.set_trans_unchecked(motion.trans);
-			mf.hitbox.update(motion.trans);
-			mf.collider = projectile_collider{};
+			auto [motion, col, dmg] = get_unwrap_of<mech_motion, collider, projectile_manifold>(comps);
+			(void)motion;
+			(void)dmg;
 
 			// dmg.max_damage_group.material_damage.direct = 3000;
 			// dmg.current_damage_group = dmg.max_damage_group;
@@ -96,8 +90,11 @@ namespace mo_yanxi::game::ecs{
 			auto [drawer] = get_unwrap_of<projectile_drawer>(comps);
 
 			if(drawer.drawer.drawer.index() == 0){
+				const auto extent = col.shape.empty()
+					? math::vec2{1.f, 1.f}
+					: col.shape.aabb().extent();
 				drawer::rect_drawer d{
-					.extent = {mf.hitbox[0].box.get_identity().size},
+					.extent = extent,
 					.color_scl = graphic::colors::aqua.to_light(),
 				};
 				drawer.drawer = d;

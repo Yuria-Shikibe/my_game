@@ -6,6 +6,7 @@ export module mo_yanxi.game.ecs.component.physical_property;
 
 export import mo_yanxi.math.vector2;
 export import mo_yanxi.math.trans2;
+export import mo_yanxi.game.physics.rigid_body;
 import std;
 
 export namespace mo_yanxi::game::ecs{
@@ -69,21 +70,25 @@ export namespace mo_yanxi::game::ecs{
 			return vel.vec - dst_to_self.cross(math::clamp_range(static_cast<float>(vel.rot), 15.f));
 		}
 	};
-	
-	struct physical_rigid{
-		float inertial_mass = 1000;
-		// float rotational_inertia_scale = 1 / 12.0f;
+	struct physics_body{
+		physics::rigid_body body{physics::rigid_body::make_dynamic(1000.f)};
 
-		/** @brief [0, 1]*/
-		float friction_coefficient = 0.35f;
-		float restitution = 0.1f;
+		[[nodiscard]] static constexpr physics_body make_static() noexcept{
+			return {.body = physics::rigid_body::make_static()};
+		}
 
+		[[nodiscard]] static constexpr physics_body make_kinematic() noexcept{
+			return {.body = physics::rigid_body::make_kinematic()};
+		}
 
-		/** @brief Used For Force Correction*/
-		float collide_force_scale = 1.0f;
+		[[nodiscard]] static constexpr physics_body make_dynamic(
+			const float mass,
+			const float rotational_inertia = -1.f) noexcept{
+			return {.body = physics::rigid_body::make_dynamic(mass, rotational_inertia)};
+		}
 
-		float drag{0.025f};
-
-		double rotational_inertia = -1.;
+		[[nodiscard]] constexpr bool dynamic() const noexcept{
+			return body.is_dynamic();
+		}
 	};
 }

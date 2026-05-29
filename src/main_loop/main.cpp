@@ -437,6 +437,7 @@ void prepare(mo_yanxi::backend::vulkan::context& ctx){
 #pragma region GuiBindingFn
 	auto init_fn = [&](gui::example::main_loop_type& loop) -> gui::example::main_loop_init_return_t {
 		gui::example::main_loop_init_return_t ret{};
+		loop.payload.game->initialize();
 
 		auto ui_providers = gui::example::build_main_ui(loop.get_ctx(), loop.get_renderer().create_frontend());
 		auto& scene = *ui_providers.scene_ptr;
@@ -534,7 +535,8 @@ void prepare(mo_yanxi::backend::vulkan::context& ctx){
 	gui::example::main_loop_type main_loop{std::move(renderer), ctx, {
 			.init_fn = init_fn,
 			.main_loop_fn = gui::example::main_loop_fn,
-			.exit_fn = [](const gui::example::main_loop_type&){
+			.exit_fn = [](gui::example::main_loop_type& loop){
+				loop.payload.game->shutdown();
 				gui::example::clear_main_ui();
 			}
 		}};

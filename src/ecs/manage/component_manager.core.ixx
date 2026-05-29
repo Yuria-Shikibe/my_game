@@ -75,6 +75,7 @@ namespace mo_yanxi::game::ecs{
 		friend struct archetype;
 		friend struct archetype_base;
 		friend struct entity_ref;
+		friend struct entity_pin;
 
 		// entity_id id_{};
 		std::atomic_size_t referenced_count{};
@@ -574,21 +575,21 @@ namespace mo_yanxi::game::ecs{
 			}
 
 			eid->chunk_index_ = idx;
-			emplace_component_row(std::move(comp), std::make_index_sequence<std::tuple_size_v<raw_tuple>>{});
+			this->emplace_component_row(std::move(comp), std::make_index_sequence<std::tuple_size_v<raw_tuple>>{});
 			archetype_base::insert(eid);
 
-			init_components_at(idx);
+			this->init_components_at(idx);
 
 			if constexpr (requires(components& row){ trait::on_init(row); }){
-				auto row = make_component_row(idx);
+				auto row = this->make_component_row(idx);
 				trait::on_init(row);
-				assign_component_row(idx, std::move(row));
+				this->assign_component_row(idx, std::move(row));
 			}
 			eid->expire_staging_counter_ = trait::expire_counter;
 			{
-				auto row = make_component_row(idx);
+				auto row = this->make_component_row(idx);
 				this->init(row);
-				assign_component_row(idx, std::move(row));
+				this->assign_component_row(idx, std::move(row));
 			}
 
 			return idx;

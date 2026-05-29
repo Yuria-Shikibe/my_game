@@ -1,7 +1,7 @@
 export module mo_yanxi.game.ecs.world.top;
 
 export import mo_yanxi.game.ecs.component.manage;
-export import mo_yanxi.game.ecs.system.collision;
+export import mo_yanxi.game.ecs.system.physics;
 export import mo_yanxi.game.world.graphic;
 
 import std;
@@ -12,7 +12,7 @@ namespace mo_yanxi::game::world{
 		ecs::component_manager component_manager{};
 		graphic_context graphic_context{};
 
-		ecs::system::collision_system collision_system{};
+		ecs::system::physics_system physics_system{};
 
 		[[nodiscard]] entity_top_world() = default;
 
@@ -21,10 +21,10 @@ namespace mo_yanxi::game::world{
 		}
 
 		void reset(){
-			std::destroy_at(&collision_system);
+			std::destroy_at(&physics_system);
 			std::destroy_at(&component_manager);
 			std::construct_at(&component_manager);
-			std::construct_at(&collision_system);
+			std::construct_at(&physics_system);
 		}
 	};
 }

@@ -6,7 +6,7 @@ export import mo_yanxi.shared_stack;
 
 import mo_yanxi.game.ecs.component.manage;
 import mo_yanxi.game.ecs.component.drawer;
-import mo_yanxi.game.ecs.component.manifold;
+import mo_yanxi.game.ecs.component.physics;
 import mo_yanxi.game.world.graphic;
 import std;
 
@@ -41,8 +41,8 @@ namespace mo_yanxi::game::ecs::system{
 			drawers.clear_and_reserve(std::max<std::size_t>(128, drawers.size() + failed.exchange(0, std::memory_order_relaxed)));
 
 			//TODO parallel
-			manager.sliced_each([&](const manifold& manifold, const drawer::entity_drawer& drawer){
-				if(drawer.clip.value_or(manifold.hitbox.max_wrap_bound()).expand(drawer.clipspace_margin).overlap_inclusive(viewport)){
+			manager.sliced_each([&](const collider& collider, const mech_motion& motion, const drawer::entity_drawer& drawer){
+				if(drawer.clip.value_or(collider.world_aabb(motion)).expand(drawer.clipspace_margin).overlap_inclusive(viewport)){
 					if(auto ptr = drawers.try_push_uninitialized()){
 						std::construct_at(ptr, &drawer);
 					}else{

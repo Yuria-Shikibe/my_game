@@ -7,8 +7,7 @@ export module mo_yanxi.game.aiming;
 
 export import mo_yanxi.game.ecs.component.manage;
 export import mo_yanxi.game.ecs.component.physical_property;
-export import mo_yanxi.game.ecs.component.manifold;
-export import mo_yanxi.game.quad_tree;
+export import mo_yanxi.game.ecs.system.physics;
 export import mo_yanxi.math;
 export import mo_yanxi.math.trans2;
 export import mo_yanxi.array_stack;
@@ -69,10 +68,10 @@ namespace mo_yanxi::game{
 		}
 
 		template <
-			std::predicate<const ecs::collision_object&> Filter = pred_always,
+			std::predicate<const ecs::physics_query_result&> Filter = pred_always,
 			std::strict_weak_order<float, float> SortPred = std::ranges::less>
 		void index_candidates_by_distance(
-			const game::quad_tree<ecs::collision_object>& quad_tree,
+			const ecs::system::physics_system& physics_system,
 			const ecs::entity_id self,
 			const math::vec2 position,
 			const math::range valid_distance,
@@ -81,15 +80,13 @@ namespace mo_yanxi::game{
 
 			candidates.clear();
 			const math::frect max_bound{position, valid_distance.to * 2};
-			quad_tree->intersect_then(max_bound, [](const math::frect& lhs, const math::frect& rhs){
-				return lhs.overlap_exclusive(rhs);
-			}, [&](const math::frect& lhs, const ecs::collision_object& obj){
+			physics_system.spatial_query(max_bound, [&](const ecs::physics_query_result& obj){
 				if(obj.id == self || obj.id->is_expired())return;
-				const auto obj_trs = obj.motion->pos();
+				const auto obj_trs = obj.position();
 				const auto dst = obj_trs.dst(position);
 
 				auto rng = valid_distance;
-				if(!rng.expand(std::sqrt(obj.manifold->hitbox.estimate_max_length2()) / 2).within_closed(dst))return;
+				if(!rng.expand(obj.radius_bound()).within_closed(dst))return;
 				if(!std::invoke(filter, obj))return;
 
 				candidates.push_back(weighted_entity{
@@ -101,14 +98,14 @@ namespace mo_yanxi::game{
 		}
 
 		template <
-			std::predicate<const ecs::collision_object&> Filter = pred_always,
+			std::predicate<const ecs::physics_query_result&> Filter = pred_always,
 			std::invocable<const weighted_entity&> SortPredProj = decltype(&weighted_entity::preference),
 			std::strict_weak_order<std::invoke_result_t<SortPredProj, const weighted_entity&>, std::invoke_result_t<SortPredProj, const weighted_entity&>> SortPred = std::ranges::less,
-			std::invocable<const ecs::collision_object&> PrefProj
+			std::invocable<const ecs::physics_query_result&> PrefProj
 		>
-			requires (std::convertible_to<std::invoke_result_t<PrefProj, const ecs::collision_object&>, float>)
+			requires (std::convertible_to<std::invoke_result_t<PrefProj, const ecs::physics_query_result&>, float>)
 		void index_candidates_by_distance(
-			const game::quad_tree<ecs::collision_object>& quad_tree,
+			const ecs::system::physics_system& physics_system,
 			const ecs::entity_id self,
 			const math::vec2 position,
 			const math::range valid_distance,
@@ -117,16 +114,14 @@ namespace mo_yanxi::game{
 
 			candidates.clear();
 			const math::frect max_bound{position, valid_distance.to * 2};
-			quad_tree->intersect_then(max_bound, [](const math::frect& lhs, const math::frect& rhs){
-				return lhs.overlap_exclusive(rhs);
-			}, [&](const math::frect& lhs, const ecs::collision_object& obj){
+			physics_system.spatial_query(max_bound, [&](const ecs::physics_query_result& obj){
 				if(obj.id == self || obj.id->is_expired())return;
 
-				const auto obj_trs = obj.motion->pos();
+				const auto obj_trs = obj.position();
 				const auto dst = obj_trs.dst(position);
 
 				auto rng = valid_distance;
-				if(!rng.expand(std::sqrt(obj.manifold->hitbox.estimate_max_length2()) / 2).within_closed(dst))return;
+				if(!rng.expand(obj.radius_bound()).within_closed(dst))return;
 				if(!std::invoke(filter, obj))return;
 
 				candidates.push_back(weighted_entity{

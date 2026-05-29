@@ -37,20 +37,50 @@ target("game")
     set_languages("c++latest")
 
     add_deps("xrgui.default")
+    add_ecs_entity_port_includes()
 
     set_warnings("all", "pedantic")
 
-    add_files("src/**.ixx")
-    add_files("src/**.cpp")
+    add_files("src/math/**.ixx")
+    add_files("src/game/physics/**.ixx")
+    add_files("src/game/runtime/**.ixx")
+    add_files("src/game/runtime/**.cpp")
+    add_files("src/main_loop/**.ixx")
+    add_files("src/main_loop/**.cpp")
+    add_files("src/ecs/**.ixx")
+    add_files("src/ecs/**.cpp")
+    add_files("src/game/entity/components/physical_rigid.ixx")
+    add_files("src/game/entity/components/physics.ixx")
+    add_files("src/game/entity/system/physics_system.ixx")
     add_files("external/xrgui/src/sync/sync_processor.ixx")
-    remove_files("src/game/entity/**.ixx")
-    remove_files("src/ecs/**.ixx")
-    remove_files("src/ecs/**.cpp")
 
     if is_mode("release") then
         set_policy("build.optimization.lto", true)
     end
 
+target_end()
+
+target("game_instance_test")
+    set_kind("binary")
+    set_extension(".exe")
+    set_languages("c++latest")
+    set_default(false)
+
+    add_deps("xrgui.default")
+    add_ecs_entity_port_includes()
+
+    set_warnings("all", "pedantic")
+
+    add_files("src/math/**.ixx")
+    add_files("src/ecs/**.ixx")
+    add_files("src/ecs/**.cpp")
+    add_files("src/game/physics/**.ixx")
+    add_files("src/game/runtime/**.ixx")
+    add_files("src/game/runtime/**.cpp")
+    add_files("src/game/entity/components/physical_rigid.ixx")
+    add_files("src/game/entity/components/physics.ixx")
+    add_files("src/game/entity/system/physics_system.ixx")
+    add_files("tests/game_instance_test/main.cpp")
 target_end()
 
 target("ecs_entity_test")
@@ -94,6 +124,29 @@ target("physics_core_test")
 
     add_files("src/game/physics/**.ixx")
     add_files("tests/physics_core_test/main.cpp")
+target_end()
+
+target("physics_ecs_test")
+    set_kind("binary")
+    set_extension(".exe")
+    set_languages("c++latest")
+    set_default(false)
+
+    add_deps("xrgui.default")
+    add_ecs_entity_port_includes()
+
+    set_warnings("all", "pedantic")
+
+    add_files("src/ecs/**.ixx")
+    add_files("src/ecs/**.cpp")
+    add_files("src/game/physics/**.ixx")
+    add_files("src/game/entity/components/physical_rigid.ixx")
+    add_files("src/game/entity/components/physics.ixx")
+    add_files("src/game/entity/components/damage.ixx")
+    add_files("src/game/entity/components/projectile/projectile_manifold.ixx")
+    add_files("src/game/entity/system/physics_system.ixx")
+    add_files("src/game/entity/misc/aiming.ixx")
+    add_files("tests/physics_ecs_test/main.cpp")
 target_end()
 
 

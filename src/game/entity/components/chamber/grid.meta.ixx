@@ -7,7 +7,7 @@ export module mo_yanxi.game.ecs.component.chamber:grid_meta;
 
 import :chamber_meta;
 import mo_yanxi.game.ecs.component.physical_property;
-import mo_yanxi.game.meta.hitbox;
+import mo_yanxi.game.physics;
 import mo_yanxi.open_addr_hash_map;
 import mo_yanxi.algo;
 import mo_yanxi.algo.timsort;
@@ -281,7 +281,7 @@ namespace mo_yanxi::game{
 
 			[[nodiscard]] grid() noexcept = default;
 
-			[[nodiscard]] explicit grid(const hitbox& hitbox);
+			[[nodiscard]] explicit grid(const physics::collision_shape& shape);
 
 			[[nodiscard]] grid(const math::usize2 extent, const math::point2 origin_coord, std::vector<grid_tile>&& tiles) noexcept;
 

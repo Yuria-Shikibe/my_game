@@ -155,8 +155,12 @@ namespace mo_yanxi::game::meta{
 		using comp_t = ret_t::component_chunk_type;
 		comp_t comp;
 
-		comp.get<ecs::manifold>().hitbox = game::hitbox{metainfo.hitbox};
-		comp.get<ecs::physical_rigid>() = metainfo.rigid;
+		auto& collider = comp.get<ecs::collider>();
+		collider.shape = metainfo.collision_shape.to_record();
+		collider.filter = metainfo.filter;
+		collider.ccd = metainfo.rigid.ccd;
+		collider.ccd_threshold = metainfo.rigid.ccd_threshold;
+		comp.get<ecs::physics_body>().body = metainfo.rigid;
 		comp.set_trail_style(metainfo.trail_style);
 		comp.drawer = metainfo.drawer;
 		comp.set_damage(metainfo.damage);

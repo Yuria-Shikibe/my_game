@@ -788,6 +788,76 @@ struct collision_shape{
 };
 
 export
+[[nodiscard]] constexpr collision_shape make_circle_collision_shape(
+	const float radius,
+	const math::trans2 local_transform = {}){
+	collision_shape shape{};
+	shape.add(shape_of<circle_shape>{
+		.local_transform = local_transform,
+		.shape = {radius}
+	});
+	return shape;
+}
+
+export
+[[nodiscard]] constexpr collision_shape make_capsule_collision_shape(
+	const math::vec2 begin,
+	const math::vec2 end,
+	const float radius,
+	const math::trans2 local_transform = {}){
+	collision_shape shape{};
+	shape.add(shape_of<capsule_shape>{
+		.local_transform = local_transform,
+		.shape = {begin, end, radius}
+	});
+	return shape;
+}
+
+export
+[[nodiscard]] constexpr collision_shape make_box_collision_shape(
+	const math::vec2 half_extent,
+	const math::trans2 local_transform = {}){
+	collision_shape shape{};
+	shape.add(shape_of<box_shape>{
+		.local_transform = local_transform,
+		.shape = {half_extent}
+	});
+	return shape;
+}
+
+export
+template<polygon_vertex_range Vertices>
+[[nodiscard]] constexpr collision_shape make_convex_polygon_collision_shape(
+	Vertices&& vertices,
+	const math::trans2 local_transform = {}){
+	collision_shape shape{};
+	shape.add(shape_of<convex_polygon_shape>{
+		.local_transform = local_transform,
+		.shape = make_convex_polygon(std::forward<Vertices>(vertices))
+	});
+	return shape;
+}
+
+export
+template<polygon_vertex_range Vertices>
+[[nodiscard]] constexpr collision_shape make_polygon_collision_shape(
+	Vertices&& vertices,
+	const math::trans2 local_transform = {}){
+	collision_shape shape{};
+	const auto source_size = std::ranges::size(vertices);
+	if(source_size > 2){
+		shape.convex_polygons.reserve(source_size - 2);
+	}
+	physics::decompose_polygon(std::forward<Vertices>(vertices), [&](convex_polygon_shape polygon){
+		shape.add(shape_of<convex_polygon_shape>{
+			.local_transform = local_transform,
+			.shape = std::move(polygon)
+		});
+	});
+	return shape;
+}
+
+export
 struct collision_shape_record{
 	collision_shape_record() = default;
 

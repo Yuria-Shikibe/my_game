@@ -4,19 +4,46 @@
 
 export module mo_yanxi.gui.game_examples.loop_exec;
 
+export import mo_yanxi.game.instance;
 import mo_yanxi.gui.default_config.main_loop;
-import mo_yanxi.graphic.trail;
-import mo_yanxi.math.rect_ortho;
-import mo_yanxi.math.vector2;
+import std;
 
 namespace mo_yanxi::gui::example{
 export
-struct main_loop_payload{
-	graphic::uniformed_trail trail{60, .75f};
+class game_instance_holder{
+private:
+	std::unique_ptr<game::game_instance> game_{std::make_unique<game::game_instance>()};
 
-	[[nodiscard]] main_loop_payload(){
-		trail.shrink_interval *= 2.f;
+public:
+	game_instance_holder() = default;
+
+	game_instance_holder(const game_instance_holder&) = delete;
+	game_instance_holder& operator=(const game_instance_holder&) = delete;
+
+	game_instance_holder(game_instance_holder&& other) noexcept = default;
+	game_instance_holder& operator=(game_instance_holder&& other) noexcept = default;
+	~game_instance_holder() = default;
+
+	[[nodiscard]] game::game_instance& get() noexcept{
+		return *game_;
 	}
+
+	[[nodiscard]] const game::game_instance& get() const noexcept{
+		return *game_;
+	}
+
+	[[nodiscard]] game::game_instance* operator->() noexcept{
+		return game_.get();
+	}
+
+	[[nodiscard]] const game::game_instance* operator->() const noexcept{
+		return game_.get();
+	}
+};
+
+export
+struct main_loop_payload{
+	game_instance_holder game{};
 };
 
 export using main_loop_type = main_loop<main_loop_payload>;
