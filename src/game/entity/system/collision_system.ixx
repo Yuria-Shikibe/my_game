@@ -180,6 +180,10 @@ namespace mo_yanxi::game::ecs::system{
 			const collision_object& sbj,
 			const collision_object& obj
 		) noexcept{
+			if(sbj == obj)return false;
+
+			if(!sbj.manifold->hitbox.max_wrap_bound().overlap_exclusive(obj.manifold->hitbox.max_wrap_bound()))return false;
+
 			if(std::abs(sbj.motion->depth - obj.motion->depth) > sbj.manifold->thickness + obj.manifold->thickness) return
 				false;
 

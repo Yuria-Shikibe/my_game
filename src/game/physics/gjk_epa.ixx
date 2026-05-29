@@ -81,10 +81,20 @@ namespace mo_yanxi::game::physics{
 	};
 
 	export
+	template<class Shape>
+	concept collision_support_shape = requires(
+		const Shape& shape,
+		const math::vec2 direction,
+		const math::trans2 transform){
+		{ shape.support(direction, transform) } -> std::same_as<math::vec2>;
+	};
+
+	export
+	template<collision_support_shape ShapeA, collision_support_shape ShapeB>
 	[[nodiscard]] support_vertex support(
-		const collision_shape& a,
+		const ShapeA& a,
 		const math::trans2 transform_a,
-		const collision_shape& b,
+		const ShapeB& b,
 		const math::trans2 transform_b,
 		const math::vec2 direction) noexcept{
 		const auto point_a = a.support(direction, transform_a);
@@ -164,10 +174,11 @@ namespace mo_yanxi::game::physics{
 	}
 
 	export
+	template<collision_support_shape ShapeA, collision_support_shape ShapeB>
 	[[nodiscard]] gjk_result gjk_intersect(
-		const collision_shape& a,
+		const ShapeA& a,
 		const math::trans2 transform_a,
-		const collision_shape& b,
+		const ShapeB& b,
 		const math::trans2 transform_b) noexcept{
 		math::vec2 direction = transform_b.vec - transform_a.vec;
 		if(direction.length2() <= detail::gjk_epsilon * detail::gjk_epsilon){
@@ -277,10 +288,11 @@ namespace mo_yanxi::game::physics{
 	}
 
 	export
+	template<collision_support_shape ShapeA, collision_support_shape ShapeB>
 	[[nodiscard]] contact_result epa_penetration(
-		const collision_shape& a,
+		const ShapeA& a,
 		const math::trans2 transform_a,
-		const collision_shape& b,
+		const ShapeB& b,
 		const math::trans2 transform_b,
 		const gjk_result& gjk) noexcept{
 		if(!gjk.intersect || gjk.final_simplex.count < 3){
@@ -327,10 +339,11 @@ namespace mo_yanxi::game::physics{
 	}
 
 	export
+	template<collision_support_shape ShapeA, collision_support_shape ShapeB>
 	[[nodiscard]] contact_result collide(
-		const collision_shape& a,
+		const ShapeA& a,
 		const math::trans2 transform_a,
-		const collision_shape& b,
+		const ShapeB& b,
 		const math::trans2 transform_b) noexcept{
 		const auto gjk = gjk_intersect(a, transform_a, b, transform_b);
 		if(!gjk.intersect){
