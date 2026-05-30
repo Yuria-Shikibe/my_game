@@ -7,6 +7,7 @@ export module mo_yanxi.game.ecs.component.manage:misc;
 import :serializer;
 import mo_yanxi.type_register;
 import mo_yanxi.concepts;
+import mo_yanxi.meta_programming;
 import mo_yanxi.seq_chunk;
 import mo_yanxi.strided_span;
 import mo_yanxi.utility;
@@ -59,15 +60,120 @@ namespace mo_yanxi::game::ecs{
 	template <typename TupleT>
 	struct archetype;
 
-	struct staging_add_base{
-		virtual ~staging_add_base() = default;
-		[[nodiscard]] virtual type_identity_index get_idx() const noexcept = 0;
-		virtual void add_archetype(component_manager& manager) const noexcept = 0;
-		virtual void push_entity(component_manager& manager) noexcept = 0;
+	export enum class entity_state : std::uint8_t{
+		staging,
+		valid,
+		expired,
 	};
 
-	export struct entity;
-	export using entity_id = entity*;
+	export inline constexpr std::uint32_t invalid_entity_slot = std::numeric_limits<std::uint32_t>::max();
+
+	export
+	struct entity_id{
+	private:
+		component_manager* owner_{};
+		std::uint32_t slot_{invalid_entity_slot};
+		std::uint32_t generation_{};
+
+		friend component_manager;
+
+	public:
+		[[nodiscard]] constexpr entity_id() noexcept = default;
+
+		[[nodiscard]] constexpr entity_id(
+			component_manager* owner,
+			const std::uint32_t slot,
+			const std::uint32_t generation) noexcept
+			: owner_(owner),
+			  slot_(slot),
+			  generation_(generation){
+		}
+
+		[[nodiscard]] constexpr component_manager* owner() const noexcept{
+			return owner_;
+		}
+
+		[[nodiscard]] constexpr std::uint32_t slot() const noexcept{
+			return slot_;
+		}
+
+		[[nodiscard]] constexpr std::uint32_t generation() const noexcept{
+			return generation_;
+		}
+
+		[[nodiscard]] constexpr explicit operator bool() const noexcept{
+			return owner_ != nullptr && slot_ != invalid_entity_slot && generation_ != 0;
+		}
+
+		[[nodiscard]] constexpr const entity_id* operator->() const noexcept{
+			return this;
+		}
+
+		[[nodiscard]] constexpr entity_id* operator->() noexcept{
+			return this;
+		}
+
+		[[nodiscard]] entity_state get_state() const noexcept;
+
+		[[nodiscard]] bool is_staging() const noexcept;
+
+		[[nodiscard]] bool is_inserted() const noexcept;
+
+		[[nodiscard]] bool is_expired() const noexcept;
+
+		[[nodiscard]] std::size_t chunk_index() const noexcept;
+
+		template <typename T>
+		[[nodiscard]] T* try_get() const noexcept;
+
+		template <typename T>
+		[[nodiscard]] bool has() const noexcept;
+
+		template <typename T>
+		[[nodiscard]] T& at() const noexcept;
+
+		template <typename Tuple, typename T>
+		[[nodiscard]] T* get() const noexcept;
+
+		template <typename C, typename T>
+		[[nodiscard]] T& operator->*(T C::* mptr) const noexcept{
+			return this->template at<C>().*mptr;
+		}
+
+		template <typename T>
+			requires std::is_member_function_pointer_v<T>
+		[[nodiscard]] decltype(auto) operator->*(T mfptr) const noexcept{
+			using trait = mptr_info<T>;
+			using class_type = trait::class_type;
+
+			return [&, this]<std::size_t ...Idx>(std::index_sequence<Idx...>){
+				return [mfptr, &object = this->template at<class_type>()](std::tuple_element_t<Idx, typename trait::func_args> ...args) -> decltype(auto) {
+					return std::invoke(mfptr, object, std::forward<decltype(args)>(args)...);
+				};
+			}(std::make_index_sequence<std::tuple_size_v<typename trait::func_args>>{});
+		}
+
+		[[nodiscard]] friend constexpr bool operator==(const entity_id& lhs, const entity_id& rhs) noexcept = default;
+
+		[[nodiscard]] friend constexpr bool operator==(const entity_id& lhs, std::nullptr_t) noexcept{
+			return !lhs;
+		}
+
+		[[nodiscard]] friend constexpr bool operator==(std::nullptr_t, const entity_id& rhs) noexcept{
+			return !rhs;
+		}
+
+		[[nodiscard]] friend constexpr std::strong_ordering operator<=>(const entity_id& lhs, const entity_id& rhs) noexcept{
+			if(auto owner_order = std::compare_three_way{}(lhs.owner_, rhs.owner_); owner_order != std::strong_ordering::equal){
+				return owner_order;
+			}
+			if(lhs.slot_ < rhs.slot_)return std::strong_ordering::less;
+			if(rhs.slot_ < lhs.slot_)return std::strong_ordering::greater;
+			if(lhs.generation_ < rhs.generation_)return std::strong_ordering::less;
+			if(rhs.generation_ < lhs.generation_)return std::strong_ordering::greater;
+			return std::strong_ordering::equal;
+		}
+	};
 
 	export
 	struct chunk_meta{
@@ -95,6 +201,8 @@ namespace mo_yanxi::game::ecs{
 
 	export
 	struct archetype_base{
+		friend component_manager;
+
 	protected:
 		template <typename T>
 		[[nodiscard]] static constexpr chunk_meta& meta_of(T& comp) noexcept{
@@ -115,9 +223,7 @@ namespace mo_yanxi::game::ecs{
 
 		virtual std::size_t insert(const entity_id entity);
 
-		virtual void erase(const entity_id entity);
-
-		virtual void erase_at(const entity_id entity, std::size_t idx);
+		void erase(const entity_id entity);
 
 		virtual bool erase_staging(const entity_id entity) noexcept{
 			return false;
@@ -127,7 +233,10 @@ namespace mo_yanxi::game::ecs{
 
 	protected:
 
-		virtual void* get_chunk_partial_ptr(type_identity_index type, std::size_t idx) noexcept = 0;
+		static void detach_entity(const entity_id entity) noexcept;
+		virtual void erase_at(const entity_id entity, std::size_t idx);
+
+		virtual void get_components_span_impl(std::span<void*> components, std::size_t idx) noexcept = 0;
 		virtual strided_span<std::byte> get_staging_chunk_partial_slice(type_identity_index type) noexcept = 0;
 
 	public:
@@ -146,7 +255,21 @@ namespace mo_yanxi::game::ecs{
 
 		template <typename T>
 		[[nodiscard]] T* try_get_comp(const std::size_t idx) noexcept{
-			return static_cast<T*>(this->get_chunk_partial_ptr(unstable_type_identity_of<T>(), idx));
+			return std::get<0>(this->template get_components<T>(idx));
+		}
+
+		template <typename ...Ts>
+		[[nodiscard]] std::tuple<Ts*...> get_components(const std::size_t idx) noexcept{
+			static_assert((std::is_object_v<Ts> && ...));
+			std::array<void*, sizeof...(Ts)> components{
+				const_cast<void*>(static_cast<const void*>(mo_yanxi::unstable_type_identity_of<Ts>())) ...
+			};
+
+			this->get_components_span_impl(std::span<void*>{components}, idx);
+
+			return [&]<std::size_t ...Idx>(std::index_sequence<Idx...>) noexcept{
+				return std::tuple<Ts*...>{static_cast<Ts*>(components[Idx]) ...};
+			}(std::index_sequence_for<Ts...>{});
 		}
 
 		template <typename T>
@@ -158,7 +281,8 @@ namespace mo_yanxi::game::ecs{
 		template <typename T>
 		[[nodiscard]] T* try_get_comp(entity_id id) noexcept;
 
-		virtual void dump_staging() = 0;
+		virtual void dump_staging(){
+		}
 
 		[[nodiscard]] virtual std::size_t size() const noexcept = 0;
 	};

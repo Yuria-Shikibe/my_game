@@ -26,93 +26,25 @@ struct entity_pin{
 private:
 	entity_id id_{};
 
-	[[nodiscard]] static bool can_pin(const entity_id id) noexcept{
-		return id && id->get_state() == entity_state::valid;
-	}
-
-	void acquire_valid(const entity_id id) noexcept{
-		if(can_pin(id)){
-			id_ = id;
-			id_->referenced_count.fetch_add(1, std::memory_order_relaxed);
-		} else{
-			id_ = nullptr;
-		}
-	}
-
-	void acquire_pinned(const entity_id id) noexcept{
-		if(id){
-			id_ = id;
-			id_->referenced_count.fetch_add(1, std::memory_order_relaxed);
-		} else{
-			id_ = nullptr;
-		}
-	}
-
-	void release() noexcept{
-		if(id_){
-			const auto rst = id_->referenced_count.fetch_sub(1, std::memory_order_relaxed);
-			assert(rst != 0);
-			id_ = nullptr;
-		}
-	}
-
 public:
 	[[nodiscard]] constexpr entity_pin() noexcept = default;
 
-	[[nodiscard]] explicit(false) entity_pin(const entity_id entity_id) noexcept{
-		this->acquire_valid(entity_id);
-	}
-
-	[[nodiscard]] explicit(false) entity_pin(entity& entity) noexcept{
-		this->acquire_valid(entity.id());
-	}
-
-	entity_pin(const entity_pin& other) noexcept{
-		this->acquire_pinned(other.id_);
-	}
-
-	entity_pin(entity_pin&& other) noexcept
-		: id_{std::exchange(other.id_, {})}{
-	}
-
-	entity_pin& operator=(const entity_pin& other) noexcept{
-		if(this == &other) return *this;
-		this->release();
-		this->acquire_pinned(other.id_);
-		return *this;
-	}
-
-	entity_pin& operator=(entity_pin&& other) noexcept{
-		if(this == &other) return *this;
-		this->release();
-		id_ = std::exchange(other.id_, {});
-		return *this;
+	[[nodiscard]] explicit(false) constexpr entity_pin(const entity_id entity_id) noexcept
+		: id_(entity_id){
 	}
 
 	entity_pin& operator=(const entity_id other) noexcept{
-		if(id_ == other){
-			if(!can_pin(id_)){
-				this->release();
-			}
-			return *this;
-		}
-
-		this->release();
-		this->acquire_valid(other);
+		id_ = other;
 		return *this;
 	}
 
 	entity_pin& operator=(std::nullptr_t) noexcept{
-		this->release();
+		id_ = {};
 		return *this;
 	}
 
-	~entity_pin(){
-		this->release();
-	}
-
 	[[nodiscard]] explicit operator bool() const noexcept{
-		return id_ != nullptr;
+		return static_cast<bool>(id_);
 	}
 
 	[[nodiscard]] entity_id raw_id() const noexcept{
@@ -120,15 +52,15 @@ public:
 	}
 
 	[[nodiscard]] bool is_inserted() const noexcept{
-		return id_ && id_->is_inserted();
+		return id_.is_inserted();
 	}
 
 	[[nodiscard]] bool is_expired() const noexcept{
-		return id_ && id_->is_expired();
+		return id_ && id_.is_expired();
 	}
 
 	[[nodiscard]] entity_id valid_id() const noexcept{
-		return this->is_inserted() ? id_ : nullptr;
+		return this->is_inserted() ? id_ : entity_id{};
 	}
 
 	friend bool operator==(const entity_pin& lhs, const entity_pin& rhs) noexcept = default;
@@ -148,24 +80,15 @@ private:
 	entity_id id_{};
 
 	[[nodiscard]] static bool can_acquire_ref(const entity_id id) noexcept{
-		return id && id->get_state() == entity_state::valid;
+		return id && id.is_inserted();
 	}
 
 	void acquire(const entity_id id) noexcept{
-		if(can_acquire_ref(id)){
-			id_ = id;
-			id_->referenced_count.fetch_add(1, std::memory_order_relaxed);
-		} else{
-			id_ = nullptr;
-		}
+		id_ = can_acquire_ref(id) ? id : entity_id{};
 	}
 
 	void release() noexcept{
-		if(id_){
-			auto rst = id_->referenced_count.fetch_sub(1, std::memory_order_relaxed);
-			assert(rst != 0);
-			id_ = nullptr;
-		}
+		id_ = {};
 	}
 
 public:
@@ -173,10 +96,6 @@ public:
 
 	[[nodiscard]] explicit(false) entity_ref(entity_id entity_id) noexcept{
 		acquire(entity_id);
-	}
-
-	[[nodiscard]] explicit(false) entity_ref(entity& entity) noexcept{
-		acquire(entity.id());
 	}
 
 	entity_ref(const entity_ref& other) noexcept{
@@ -207,7 +126,7 @@ public:
 		return *this;
 	}
 
-	entity_ref& operator=(std::nullptr_t other) noexcept{
+	entity_ref& operator=(std::nullptr_t) noexcept{
 		release();
 		return *this;
 	}
@@ -223,22 +142,18 @@ public:
 		release();
 	}
 
-	entity* operator->() const noexcept{
+	const entity_id* operator->() const noexcept{
+		assert(this->operator bool());
+		return std::addressof(id_);
+	}
+
+	const entity_id& operator*() const noexcept{
 		assert(this->operator bool());
 		return id_;
 	}
 
-	entity& operator*() const noexcept{
-		assert(this->operator bool());
-		return *id_;
-	}
-
-	void reset(const entity_id entity_id = nullptr) noexcept{
+	void reset(const entity_id entity_id = {}) noexcept{
 		this->operator=(entity_id);
-	}
-
-	void reset(entity& entity) noexcept{
-		this->operator=(entity);
 	}
 
 	explicit operator bool() const noexcept{
@@ -246,13 +161,13 @@ public:
 	}
 
 	[[nodiscard]] entity_id id() const noexcept{
-		return can_acquire_ref(id_) ? id_ : nullptr;
+		return can_acquire_ref(id_) ? id_ : entity_id{};
 	}
 
 	template <typename C, typename T>
 	FORCE_INLINE T& operator->*(T C::* mptr) const noexcept{
 		assert(this->operator bool());
-		return id_->operator->*<C, T>(mptr);
+		return id_.operator->*<C, T>(mptr);
 	}
 
 
@@ -260,12 +175,7 @@ public:
 		requires (std::is_member_function_pointer_v<T>)
 	FORCE_INLINE decltype(auto) operator->*(T mfptr) const noexcept{
 		assert(this->operator bool());
-		return id_->operator->*(mfptr);
-	}
-
-	explicit(false) operator entity&() const noexcept{
-		assert(this->operator bool());
-		return *id_;
+		return id_.operator->*(mfptr);
 	}
 
 	explicit(false) operator entity_id() const noexcept{
@@ -276,7 +186,7 @@ public:
 	 * @brief drop the referenced entity if it is already erased
 	 */
 	bool drop_if_expired() noexcept{
-		if(id_ && id_->is_expired()){
+		if(id_ && id_.is_expired()){
 			release();
 			return true;
 		}
@@ -290,13 +200,13 @@ public:
 	bool check_or_drop() noexcept{
 		if(!id_) return false;
 		else{
-			if(id_->is_expired()){
+			if(id_.is_expired()){
 				release();
 				return false;
 			}
 
 			if constexpr(check_inserted){
-				if(!id_->is_inserted()){
+				if(!id_.is_inserted()){
 					return false;
 				}
 			}
@@ -306,7 +216,7 @@ public:
 	}
 
 	[[nodiscard]] bool is_expired() const noexcept{
-		return id_ && id_->is_expired();
+		return id_ && id_.is_expired();
 	}
 
 	[[nodiscard]] bool is_valid() const noexcept{
@@ -353,25 +263,38 @@ using readonly_const_decay_t = readonly_decay<T>::type;
 
 
 std::size_t archetype_base::insert(const entity_id entity){
-	entity->id()->archetype_ = this;
+	(void)entity;
 	return 0;
 }
 
 void archetype_base::erase(const entity_id entity){
-	entity->chunk_index_ = invalid_chunk_idx;
-	entity->archetype_ = nullptr;
+	if(!entity)return;
+	this->erase_at(entity, entity->chunk_index());
+}
+
+void archetype_base::detach_entity(const entity_id entity) noexcept{
+	ecs::detach_entity_from_archetype(entity);
 }
 
 void archetype_base::erase_at(const entity_id entity, std::size_t){
-	erase(entity);
+	archetype_base::detach_entity(entity);
 }
 }
 
 
 template <>
+struct std::hash<mo_yanxi::game::ecs::entity_id>{
+	std::size_t operator()(const mo_yanxi::game::ecs::entity_id& id) const noexcept{
+		std::size_t value = std::hash<const void*>{}(id.owner());
+		value ^= std::hash<std::uint32_t>{}(id.slot()) + 0x9e3779b9u + (value << 6u) + (value >> 2u);
+		value ^= std::hash<std::uint32_t>{}(id.generation()) + 0x9e3779b9u + (value << 6u) + (value >> 2u);
+		return value;
+	}
+};
+
+template <>
 struct std::hash<mo_yanxi::game::ecs::entity_ref>{
-	static std::size_t operator()(const mo_yanxi::game::ecs::entity_ref& ref) noexcept{
-		static constexpr std::hash<const void*> hasher{};
-		return hasher(ref.id());
+	std::size_t operator()(const mo_yanxi::game::ecs::entity_ref& ref) const noexcept{
+		return std::hash<mo_yanxi::game::ecs::entity_id>{}(ref.id());
 	}
 };

@@ -77,13 +77,13 @@ namespace mo_yanxi::game::ecs::system{
 		};
 
 		struct spatial_entry{
-			entity_pin id_pin{};
+			entity_id id{};
 			math::frect aabb{};
 			math::vec2 position{};
 			float radius{};
 
 			[[nodiscard]] bool valid() const noexcept{
-				return id_pin.is_inserted();
+				return id.is_inserted();
 			}
 		};
 
@@ -160,12 +160,12 @@ namespace mo_yanxi::game::ecs::system{
 
 		void collect_proxies(component_manager& manager, const float dt){
 			proxies_.clear();
-			manager.sliced_each([&](
+			manager.each([&](
 				const chunk_meta& meta,
 				collider& collider,
 				mech_motion& motion,
 				physics_body& body){
-				if(!meta.id() || !meta.id()->is_inserted() || !collider.enabled || collider.shape.empty()){
+				if(!meta.id() || !meta.id().is_inserted() || !collider.enabled || collider.shape.empty()){
 					return;
 				}
 
@@ -195,7 +195,7 @@ namespace mo_yanxi::game::ecs::system{
 			broadphase_.clear();
 
 			for(const auto& proxy : proxies_){
-				if(!proxy.id || !proxy.id->is_inserted()){
+				if(!proxy.id || !proxy.id.is_inserted()){
 					continue;
 				}
 
@@ -204,7 +204,7 @@ namespace mo_yanxi::game::ecs::system{
 				const auto aabb = proxy.collider->shape.aabb(current_shape_transform);
 				const auto index = spatial_entries_.size();
 				spatial_entries_.push_back({
-					.id_pin = proxy.id,
+					.id = proxy.id,
 					.aabb = aabb,
 					.position = proxy.motion->pos(),
 					.radius = proxy.collider->shape.radius_bound()
@@ -650,7 +650,7 @@ namespace mo_yanxi::game::ecs::system{
 
 		[[nodiscard]] static physics_contact_endpoint_snapshot make_endpoint_snapshot(const physics_proxy& proxy) noexcept{
 			return {
-				.id_pin = proxy.id,
+				.id_ = proxy.id,
 				.previous_motion = proxy.previous_motion_transform,
 				.current_motion = proxy.current_motion_transform,
 				.previous_shape = proxy.previous_shape_transform,
@@ -784,7 +784,7 @@ namespace mo_yanxi::game::ecs::system{
 				}
 
 				physics_query_result result{
-					.id_pin = proxy.id_pin,
+					.id_ = proxy.id,
 					.aabb = proxy.aabb,
 					.position_snapshot = proxy.position,
 					.radius_snapshot = proxy.radius

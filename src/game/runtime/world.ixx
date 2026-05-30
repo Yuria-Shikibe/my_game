@@ -10,14 +10,14 @@ import std;
 
 namespace mo_yanxi::game{
 export
-struct motion_system{
+	struct motion_system{
 	void run(ecs::component_manager& manager) const{
-		manager.sliced_each([](
+		manager.each([](
 			const ecs::component_manager& current_manager,
 			const ecs::chunk_meta& meta,
 			ecs::mech_motion& motion){
 			const ecs::entity_id id = meta.id();
-			if(id != nullptr && id->try_get<ecs::physics_body>() != nullptr){
+			if(id && id.try_get<ecs::physics_body>() != nullptr){
 				return;
 			}
 
@@ -64,12 +64,12 @@ struct game_world{
 	}
 
 	void run_systems(){
-		component_manager.do_deferred();
+		component_manager.commit();
 		systems.motion.run(component_manager);
 		systems.projectile.pre_step(component_manager);
 		systems.physics.step(component_manager);
 		systems.projectile.resolve_hits(component_manager, systems.physics);
-		component_manager.do_deferred();
+		component_manager.commit();
 	}
 
 	void step(const float step_seconds){

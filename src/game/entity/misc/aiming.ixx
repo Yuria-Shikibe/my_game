@@ -34,7 +34,7 @@ namespace mo_yanxi::game{
 		}
 
 		[[nodiscard]] ecs::entity_id get_optimal() noexcept{
-			if(candidates.empty())return nullptr;
+			if(candidates.empty())return {};
 
 			auto itr = candidates.begin();
 			while(itr != candidates.end()){
@@ -48,7 +48,7 @@ namespace mo_yanxi::game{
 			}
 
 			candidates.clear();
-			return nullptr;
+			return {};
 		}
 
 		[[nodiscard]] ecs::entity_id get_optimal() const noexcept{
@@ -56,7 +56,7 @@ namespace mo_yanxi::game{
 				return itr->ref.id();
 			}
 
-			return nullptr;
+			return {};
 		}
 
 		void clear() noexcept{
@@ -82,7 +82,7 @@ namespace mo_yanxi::game{
 			const math::frect max_bound{position, valid_distance.to * 2};
 			physics_system.spatial_query(max_bound, [&](const ecs::physics_query_result& obj){
 				const auto id = obj.id();
-				if(id == self || id->is_expired())return;
+				if(id == self || id.is_expired())return;
 				const auto obj_trs = obj.position();
 				const auto dst = obj_trs.dst(position);
 
@@ -117,7 +117,7 @@ namespace mo_yanxi::game{
 			const math::frect max_bound{position, valid_distance.to * 2};
 			physics_system.spatial_query(max_bound, [&](const ecs::physics_query_result& obj){
 				const auto id = obj.id();
-				if(id == self || id->is_expired())return;
+				if(id == self || id.is_expired())return;
 
 				const auto obj_trs = obj.position();
 				const auto dst = obj_trs.dst(position);

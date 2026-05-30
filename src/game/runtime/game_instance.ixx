@@ -314,7 +314,7 @@ private:
 		drawer.style.color = {0.95f, 0.72f, 0.22f, 0.95f};
 		drawer.style.stroke = 2.f;
 
-		world.components().create_entity_deferred<debug_shape_entity_desc>(std::move(components));
+		(void)world.components().spawn<debug_shape_entity_desc>(std::move(components));
 	}
 
 	void spawn_pending_debug_shape_shots(){

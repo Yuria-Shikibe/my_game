@@ -48,17 +48,13 @@ namespace mo_yanxi::game::ecs{
 	private:
 		entity_id first_id_{};
 		entity_id second_id_{};
-		entity_pin first_pin_{};
-		entity_pin second_pin_{};
 
 	public:
 		[[nodiscard]] physics_contact_key() = default;
 
 		[[nodiscard]] physics_contact_key(const entity_id first, const entity_id second) noexcept
 			: first_id_(first),
-			  second_id_(second),
-			  first_pin_(first),
-			  second_pin_(second){
+			  second_id_(second){
 		}
 
 		[[nodiscard]] static physics_contact_key ordered(entity_id lhs, entity_id rhs) noexcept{
@@ -77,10 +73,10 @@ namespace mo_yanxi::game::ecs{
 
 		[[nodiscard]] entity_pin pin_for(const entity_id id) const noexcept{
 			if(id == this->first()){
-				return first_pin_;
+				return entity_pin{first_id_};
 			}
 			if(id == this->second()){
-				return second_pin_;
+				return entity_pin{second_id_};
 			}
 			return {};
 		}
@@ -108,7 +104,7 @@ namespace mo_yanxi::game::ecs{
 
 	export
 	struct physics_contact_endpoint_snapshot{
-		entity_pin id_pin{};
+		entity_id id_{};
 		math::uniform_trans2 previous_motion{};
 		math::uniform_trans2 current_motion{};
 		math::trans2 previous_shape{};
@@ -116,11 +112,11 @@ namespace mo_yanxi::game::ecs{
 		physics::collision_filter filter{};
 
 		[[nodiscard]] entity_id id() const noexcept{
-			return id_pin.raw_id();
+			return id_;
 		}
 
 		[[nodiscard]] bool valid() const noexcept{
-			return id_pin.is_inserted();
+			return id_.is_inserted();
 		}
 	};
 
@@ -153,13 +149,13 @@ namespace mo_yanxi::game::ecs{
 
 	export
 	struct physics_query_result{
-		entity_pin id_pin{};
+		entity_id id_{};
 		math::frect aabb{};
 		math::vec2 position_snapshot{};
 		float radius_snapshot{};
 
 		[[nodiscard]] entity_id id() const noexcept{
-			return id_pin.raw_id();
+			return id_;
 		}
 
 		[[nodiscard]] math::vec2 position() const noexcept{
@@ -175,8 +171,8 @@ namespace mo_yanxi::game::ecs{
 template <>
 struct std::hash<mo_yanxi::game::ecs::physics_contact_key>{
 	[[nodiscard]] std::size_t operator()(const mo_yanxi::game::ecs::physics_contact_key& key) const noexcept{
-		const auto lhs = std::hash<const void*>{}(key.first());
-		const auto rhs = std::hash<const void*>{}(key.second());
+		const auto lhs = std::hash<mo_yanxi::game::ecs::entity_id>{}(key.first());
+		const auto rhs = std::hash<mo_yanxi::game::ecs::entity_id>{}(key.second());
 		return lhs ^ (rhs + 0x9e3779b97f4a7c15ull + (lhs << 6u) + (lhs >> 2u));
 	}
 };

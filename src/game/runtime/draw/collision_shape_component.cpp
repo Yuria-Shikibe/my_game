@@ -29,12 +29,12 @@ void collision_shape_draw_system::draw(
 	const auto viewport = camera.get_viewport();
 	const float camera_scale = std::max(camera.get_scale(), 0.0001f);
 
-	manager.sliced_each([&](
+	manager.each([&](
 		const ecs::chunk_meta& meta,
 		const ecs::collider& collider,
 		const ecs::mech_motion& motion,
 		const ecs::collision_shape_drawer& drawer){
-		if(!meta.id() || !meta.id()->is_inserted() || !drawer.enabled || !collider.enabled || collider.shape.empty()){
+		if(!meta.id() || !meta.id().is_inserted() || !drawer.enabled || !collider.enabled || collider.shape.empty()){
 			return;
 		}
 
