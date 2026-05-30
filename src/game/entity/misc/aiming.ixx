@@ -81,7 +81,8 @@ namespace mo_yanxi::game{
 			candidates.clear();
 			const math::frect max_bound{position, valid_distance.to * 2};
 			physics_system.spatial_query(max_bound, [&](const ecs::physics_query_result& obj){
-				if(obj.id == self || obj.id->is_expired())return;
+				const auto id = obj.id();
+				if(id == self || id->is_expired())return;
 				const auto obj_trs = obj.position();
 				const auto dst = obj_trs.dst(position);
 
@@ -90,7 +91,7 @@ namespace mo_yanxi::game{
 				if(!std::invoke(filter, obj))return;
 
 				candidates.push_back(weighted_entity{
-					dst, 0.f, obj.id
+					dst, 0.f, id
 				});
 			});
 
@@ -115,7 +116,8 @@ namespace mo_yanxi::game{
 			candidates.clear();
 			const math::frect max_bound{position, valid_distance.to * 2};
 			physics_system.spatial_query(max_bound, [&](const ecs::physics_query_result& obj){
-				if(obj.id == self || obj.id->is_expired())return;
+				const auto id = obj.id();
+				if(id == self || id->is_expired())return;
 
 				const auto obj_trs = obj.position();
 				const auto dst = obj_trs.dst(position);
@@ -125,7 +127,7 @@ namespace mo_yanxi::game{
 				if(!std::invoke(filter, obj))return;
 
 				candidates.push_back(weighted_entity{
-					dst, std::invoke_r<float>(preference_proj, obj), obj.id
+					dst, std::invoke_r<float>(preference_proj, obj), id
 				});
 			});
 

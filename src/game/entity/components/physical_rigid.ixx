@@ -70,6 +70,7 @@ export namespace mo_yanxi::game::ecs{
 			return vel.vec - dst_to_self.cross(math::clamp_range(static_cast<float>(vel.rot), 15.f));
 		}
 	};
+
 	struct physics_body{
 		physics::rigid_body body{physics::rigid_body::make_dynamic(1000.f)};
 

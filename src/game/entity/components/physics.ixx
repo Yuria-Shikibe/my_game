@@ -1,7 +1,5 @@
 module;
 
-#include <cstddef>
-
 export module mo_yanxi.game.ecs.component.physics;
 
 export import mo_yanxi.game.ecs.component.manage;
@@ -47,10 +45,9 @@ namespace mo_yanxi::game::ecs{
 
 	export
 	struct physics_contact_key{
-		entity_id first{};
-		entity_id second{};
-
 	private:
+		entity_id first_id_{};
+		entity_id second_id_{};
 		entity_pin first_pin_{};
 		entity_pin second_pin_{};
 
@@ -58,7 +55,10 @@ namespace mo_yanxi::game::ecs{
 		[[nodiscard]] physics_contact_key() = default;
 
 		[[nodiscard]] physics_contact_key(const entity_id first, const entity_id second) noexcept
-			: first(first), second(second), first_pin_(first), second_pin_(second){
+			: first_id_(first),
+			  second_id_(second),
+			  first_pin_(first),
+			  second_pin_(second){
 		}
 
 		[[nodiscard]] static physics_contact_key ordered(entity_id lhs, entity_id rhs) noexcept{
@@ -67,28 +67,60 @@ namespace mo_yanxi::game::ecs{
 				: physics_contact_key{lhs, rhs};
 		}
 
+		[[nodiscard]] entity_id first() const noexcept{
+			return first_id_;
+		}
+
+		[[nodiscard]] entity_id second() const noexcept{
+			return second_id_;
+		}
+
 		[[nodiscard]] entity_pin pin_for(const entity_id id) const noexcept{
-			if(id == first){
+			if(id == this->first()){
 				return first_pin_;
 			}
-			if(id == second){
+			if(id == this->second()){
 				return second_pin_;
 			}
 			return {};
 		}
 
 		friend bool operator==(const physics_contact_key& lhs, const physics_contact_key& rhs) noexcept{
-			return lhs.first == rhs.first && lhs.second == rhs.second;
+			return lhs.first() == rhs.first() && lhs.second() == rhs.second();
 		}
 
-		friend bool operator<(const physics_contact_key& lhs, const physics_contact_key& rhs) noexcept{
-			if(std::less<entity_id>{}(lhs.first, rhs.first)){
-				return true;
+		friend std::strong_ordering operator<=>(const physics_contact_key& lhs, const physics_contact_key& rhs) noexcept{
+			if(std::less<entity_id>{}(lhs.first(), rhs.first())){
+				return std::strong_ordering::less;
 			}
-			if(std::less<entity_id>{}(rhs.first, lhs.first)){
-				return false;
+			if(std::less<entity_id>{}(rhs.first(), lhs.first())){
+				return std::strong_ordering::greater;
 			}
-			return std::less<entity_id>{}(lhs.second, rhs.second);
+			if(std::less<entity_id>{}(lhs.second(), rhs.second())){
+				return std::strong_ordering::less;
+			}
+			if(std::less<entity_id>{}(rhs.second(), lhs.second())){
+				return std::strong_ordering::greater;
+			}
+			return std::strong_ordering::equal;
+		}
+	};
+
+	export
+	struct physics_contact_endpoint_snapshot{
+		entity_pin id_pin{};
+		math::uniform_trans2 previous_motion{};
+		math::uniform_trans2 current_motion{};
+		math::trans2 previous_shape{};
+		math::trans2 current_shape{};
+		physics::collision_filter filter{};
+
+		[[nodiscard]] entity_id id() const noexcept{
+			return id_pin.raw_id();
+		}
+
+		[[nodiscard]] bool valid() const noexcept{
+			return id_pin.is_inserted();
 		}
 	};
 
@@ -98,70 +130,36 @@ namespace mo_yanxi::game::ecs{
 		physics_contact_phase phase{physics_contact_phase::begin};
 		entity_id subject{};
 		entity_id object{};
+		physics_contact_endpoint_snapshot subject_endpoint{};
+		physics_contact_endpoint_snapshot object_endpoint{};
 		bool sensor{};
 		float toi{1.f};
 		float depth{};
 		math::vec2 normal{1.f, 0.f};
 		math::vec2 point{};
 
-	private:
-		entity_pin subject_pin_{};
-		entity_pin object_pin_{};
-
-	public:
-		[[nodiscard]] physics_contact_event() = default;
-
-		[[nodiscard]] physics_contact_event(
-			physics_contact_key key,
-			const physics_contact_phase phase,
-			const entity_id subject,
-			const entity_id object,
-			const bool sensor = false,
-			const float toi = 1.f,
-			const float depth = 0.f,
-			const math::vec2 normal = {1.f, 0.f},
-			const math::vec2 point = {}) noexcept
-			: key(std::move(key)),
-			  phase(phase),
-			  subject(subject),
-			  object(object),
-			  sensor(sensor),
-			  toi(toi),
-			  depth(depth),
-			  normal(normal),
-			  point(point),
-			  subject_pin_(this->key.pin_for(subject)),
-			  object_pin_(this->key.pin_for(object)){
-		}
-
 		[[nodiscard]] entity_id other(entity_id self) const noexcept{
 			return subject == self ? object : subject;
+		}
+
+		[[nodiscard]] const physics_contact_endpoint_snapshot& endpoint_for(entity_id self) const noexcept{
+			return subject == self ? subject_endpoint : object_endpoint;
+		}
+
+		[[nodiscard]] const physics_contact_endpoint_snapshot& other_endpoint(entity_id self) const noexcept{
+			return subject == self ? object_endpoint : subject_endpoint;
 		}
 	};
 
 	export
 	struct physics_query_result{
-		entity_id id{};
+		entity_pin id_pin{};
 		math::frect aabb{};
 		math::vec2 position_snapshot{};
 		float radius_snapshot{};
 
-	private:
-		entity_pin id_pin_{};
-
-	public:
-		[[nodiscard]] physics_query_result() = default;
-
-		[[nodiscard]] physics_query_result(
-			const entity_pin& id_pin,
-			const math::frect aabb,
-			const math::vec2 position,
-			const float radius) noexcept
-			: id(id_pin.raw_id()),
-			  aabb(aabb),
-			  position_snapshot(position),
-			  radius_snapshot(radius),
-			  id_pin_(id_pin){
+		[[nodiscard]] entity_id id() const noexcept{
+			return id_pin.raw_id();
 		}
 
 		[[nodiscard]] math::vec2 position() const noexcept{
@@ -177,8 +175,8 @@ namespace mo_yanxi::game::ecs{
 template <>
 struct std::hash<mo_yanxi::game::ecs::physics_contact_key>{
 	[[nodiscard]] std::size_t operator()(const mo_yanxi::game::ecs::physics_contact_key& key) const noexcept{
-		const auto lhs = std::hash<const void*>{}(key.first);
-		const auto rhs = std::hash<const void*>{}(key.second);
+		const auto lhs = std::hash<const void*>{}(key.first());
+		const auto rhs = std::hash<const void*>{}(key.second());
 		return lhs ^ (rhs + 0x9e3779b97f4a7c15ull + (lhs << 6u) + (lhs >> 2u));
 	}
 };

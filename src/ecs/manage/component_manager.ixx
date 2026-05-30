@@ -131,9 +131,7 @@ public:
 		return this->is_inserted() ? id_ : nullptr;
 	}
 
-	friend bool operator==(const entity_pin& lhs, const entity_pin& rhs) noexcept{
-		return lhs.raw_id() == rhs.raw_id();
-	}
+	friend bool operator==(const entity_pin& lhs, const entity_pin& rhs) noexcept = default;
 
 	friend bool operator==(const entity_pin& lhs, const entity_id rhs) noexcept{
 		return lhs.raw_id() == rhs;

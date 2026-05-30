@@ -126,10 +126,10 @@ private:
 	debug_camera2_binding camera_binding_{};
 	gui_debug_render_system debug_renderer_{};
 	math::vec2 render_extent_{};
-	unsigned pending_debug_box_shots_{};
+	unsigned pending_debug_shape_shots_{};
 	bool initialized_{};
 
-	using debug_box_entity_desc = std::tuple<
+	using debug_shape_entity_desc = std::tuple<
 		ecs::chunk_meta,
 		ecs::mech_motion,
 		ecs::collider,
@@ -137,13 +137,21 @@ private:
 		ecs::collision_shape_drawer
 	>;
 
-	static constexpr unsigned max_pending_debug_box_shots = 64;
-	static constexpr math::vec2 debug_box_half_extent{48.f, 16.f};
-	static constexpr float debug_box_spawn_offset{72.f};
-	static constexpr float debug_box_initial_speed{900.f};
-	static constexpr float debug_box_mass{20.f};
-	static constexpr float debug_box_rotational_inertia{18000.f};
-	static constexpr float debug_box_drag{1.2f};
+	enum class debug_shot_shape_kind : std::uint8_t{
+		circle,
+		capsule,
+		box,
+		convex_polygon,
+		compound_convex_polygons
+	};
+
+	static constexpr unsigned max_pending_debug_shape_shots = 64;
+	static constexpr math::vec2 debug_shape_box_half_extent{48.f, 16.f};
+	static constexpr float debug_shape_spawn_offset{72.f};
+	static constexpr float debug_shape_initial_speed{900.f};
+	static constexpr float debug_shape_mass{20.f};
+	static constexpr float debug_shape_rotational_inertia{18000.f};
+	static constexpr float debug_shape_drag{1.2f};
 
 	void configure_camera() noexcept{
 		world_camera_.set_scale_range({config_.camera_min_scale, config_.camera_max_scale});
@@ -186,13 +194,13 @@ private:
 		return std::min(delta_seconds, config_.max_frame_delta_seconds);
 	}
 
-	[[nodiscard]] static bool is_debug_box_shot_event(const input_handle::input_event_variant event) noexcept{
+	[[nodiscard]] static bool is_debug_shape_shot_event(const input_handle::input_event_variant event) noexcept{
 		return event.type == input_handle::input_event_type::input_key
 			&& event.input_key.action == input_handle::act::press
 			&& event.input_key.as_key() == input_handle::key::q;
 	}
 
-	[[nodiscard]] math::vec2 debug_box_direction() const noexcept{
+	[[nodiscard]] math::vec2 debug_shape_direction() const noexcept{
 		const auto origin = world_camera_.get_stable_center();
 		auto direction = camera_binding_.cursor_world(world_camera_).value_or(origin + math::vec2{1.f, 0.f}) - origin;
 		if(direction.length2() <= 0.0001f){
@@ -202,16 +210,91 @@ private:
 		return direction.normalize();
 	}
 
-	void spawn_debug_box_shot(game_world& world) const{
-		ecs::tuple_to_comp_t<debug_box_entity_desc> components{};
-		const auto direction = debug_box_direction();
+	[[nodiscard]] static std::mt19937& debug_shot_random_engine(){
+		static thread_local std::mt19937 engine{std::random_device{}()};
+		return engine;
+	}
+
+	[[nodiscard]] static debug_shot_shape_kind random_debug_shot_shape_kind(){
+		std::uniform_int_distribution<int> distribution{
+			0,
+			static_cast<int>(debug_shot_shape_kind::compound_convex_polygons)
+		};
+		return static_cast<debug_shot_shape_kind>(distribution(game_instance::debug_shot_random_engine()));
+	}
+
+	[[nodiscard]] static physics::collision_shape make_debug_compound_convex_shape(){
+		physics::collision_shape shape{};
+		const std::array left_vertices{
+			math::vec2{-30.f, -18.f},
+			math::vec2{8.f, -22.f},
+			math::vec2{24.f, 4.f},
+			math::vec2{-8.f, 22.f},
+			math::vec2{-34.f, 8.f}
+		};
+		const std::array right_vertices{
+			math::vec2{-16.f, -18.f},
+			math::vec2{28.f, -14.f},
+			math::vec2{34.f, 14.f},
+			math::vec2{-12.f, 20.f}
+		};
+		const std::array bottom_vertices{
+			math::vec2{-18.f, -12.f},
+			math::vec2{18.f, -10.f},
+			math::vec2{10.f, 16.f},
+			math::vec2{-16.f, 18.f}
+		};
+
+		shape.add(physics::shape_of<physics::convex_polygon_shape>{
+			.local_transform = {math::vec2{-24.f, -2.f}, -0.18f},
+			.shape = physics::make_convex_polygon(left_vertices)
+		});
+		shape.add(physics::shape_of<physics::convex_polygon_shape>{
+			.local_transform = {math::vec2{26.f, 0.f}, 0.12f},
+			.shape = physics::make_convex_polygon(right_vertices)
+		});
+		shape.add(physics::shape_of<physics::convex_polygon_shape>{
+			.local_transform = {math::vec2{0.f, 28.f}, 0.08f},
+			.shape = physics::make_convex_polygon(bottom_vertices)
+		});
+		return shape;
+	}
+
+	[[nodiscard]] static physics::collision_shape make_random_debug_shot_shape(){
+		switch(game_instance::random_debug_shot_shape_kind()){
+		case debug_shot_shape_kind::circle:
+			return physics::make_circle_collision_shape(34.f);
+		case debug_shot_shape_kind::capsule:
+			return physics::make_capsule_collision_shape({-42.f, 0.f}, {42.f, 0.f}, 17.f);
+		case debug_shot_shape_kind::box:
+			return physics::make_box_collision_shape(debug_shape_box_half_extent);
+		case debug_shot_shape_kind::convex_polygon:{
+			const std::array vertices{
+				math::vec2{-46.f, -14.f},
+				math::vec2{-10.f, -32.f},
+				math::vec2{42.f, -18.f},
+				math::vec2{34.f, 16.f},
+				math::vec2{-22.f, 30.f}
+			};
+			return physics::make_convex_polygon_collision_shape(vertices);
+		}
+		case debug_shot_shape_kind::compound_convex_polygons:
+			return game_instance::make_debug_compound_convex_shape();
+		}
+
+		std::unreachable();
+	}
+
+	void spawn_debug_shape_shot(game_world& world) const{
+		ecs::tuple_to_comp_t<debug_shape_entity_desc> components{};
+		auto shape = game_instance::make_random_debug_shot_shape();
+		const auto direction = debug_shape_direction();
 		const auto spawn_position = world_camera_.get_stable_center()
-			+ direction * (debug_box_half_extent.x + debug_box_spawn_offset);
-		auto shape = physics::make_box_collision_shape(debug_box_half_extent);
+			+ direction * (shape.radius_bound() + debug_shape_spawn_offset);
 
 		auto& motion = components.get<ecs::mech_motion>();
 		motion.trans = {spawn_position, direction.angle_rad()};
-		motion.vel = {direction * debug_box_initial_speed, 0.f};
+		motion.vel = {direction * debug_shape_initial_speed, 0.f};
 
 		auto& collider = components.get<ecs::collider>();
 		collider.shape = shape.to_record();
@@ -219,9 +302,9 @@ private:
 		collider.ccd_threshold = 0.5f;
 
 		auto& body = components.get<ecs::physics_body>().body;
-		body = physics::rigid_body::make_dynamic(debug_box_mass, debug_box_rotational_inertia);
-		body.linear_drag = debug_box_drag;
-		body.angular_drag = debug_box_drag;
+		body = physics::rigid_body::make_dynamic(debug_shape_mass, debug_shape_rotational_inertia);
+		body.linear_drag = debug_shape_drag;
+		body.angular_drag = debug_shape_drag;
 		body.friction = 0.5f;
 		body.restitution = 0.05f;
 		body.ccd = physics::ccd_mode::linear_sweep;
@@ -231,13 +314,13 @@ private:
 		drawer.style.color = {0.95f, 0.72f, 0.22f, 0.95f};
 		drawer.style.stroke = 2.f;
 
-		world.components().create_entity_deferred<debug_box_entity_desc>(std::move(components));
+		world.components().create_entity_deferred<debug_shape_entity_desc>(std::move(components));
 	}
 
-	void spawn_pending_debug_box_shots(){
-		const unsigned shot_count = std::exchange(pending_debug_box_shots_, 0u);
+	void spawn_pending_debug_shape_shots(){
+		const unsigned shot_count = std::exchange(pending_debug_shape_shots_, 0u);
 		for(unsigned i = 0; i != shot_count; ++i){
-			spawn_debug_box_shot(*world_);
+			spawn_debug_shape_shot(*world_);
 		}
 	}
 
@@ -260,7 +343,7 @@ public:
 	void shutdown(){
 		std::lock_guard lock{command_mutex_};
 		pending_commands_.clear();
-		pending_debug_box_shots_ = 0;
+		pending_debug_shape_shots_ = 0;
 		initialized_ = false;
 	}
 
@@ -273,7 +356,7 @@ public:
 		world_.emplace();
 		accumulated_seconds_ = 0.f;
 		render_extent_ = {};
-		pending_debug_box_shots_ = 0;
+		pending_debug_shape_shots_ = 0;
 		camera_binding_.reset_state();
 		camera_binding_.reset_camera(world_camera_);
 		configure_camera();
@@ -291,8 +374,8 @@ public:
 
 	void handle_event(const input_handle::input_event_variant event) noexcept{
 		camera_binding_.on_event(world_camera_, event);
-		if(game_instance::is_debug_box_shot_event(event)){
-			pending_debug_box_shots_ = std::min(pending_debug_box_shots_ + 1u, max_pending_debug_box_shots);
+		if(game_instance::is_debug_shape_shot_event(event)){
+			pending_debug_shape_shots_ = std::min(pending_debug_shape_shots_ + 1u, max_pending_debug_shape_shots);
 		}
 	}
 
@@ -312,7 +395,7 @@ public:
 			&& steps < config_.max_steps_per_frame){
 			world_->begin_step(fixed_step);
 			drain_commands();
-			spawn_pending_debug_box_shots();
+			spawn_pending_debug_shape_shots();
 			world_->run_systems();
 			accumulated_seconds_ -= fixed_step;
 			++steps;

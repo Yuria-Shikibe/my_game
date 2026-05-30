@@ -83,6 +83,46 @@ struct contact_result{
 };
 
 export
+struct contact_point{
+	math::vec2 point{};
+	float depth{};
+};
+
+export
+struct contact_manifold{
+	bool hit{};
+	math::vec2 normal{1.f, 0.f};
+	std::array<contact_point, 2> points{};
+	std::uint8_t point_count{};
+	unsigned gjk_iterations{};
+	unsigned epa_iterations{};
+	bool epa_converged{};
+
+	[[nodiscard]] contact_result representative() const noexcept{
+		contact_result result{
+			.hit = hit && point_count != 0,
+			.normal = normal,
+			.gjk_iterations = gjk_iterations,
+			.epa_iterations = epa_iterations,
+			.epa_converged = epa_converged
+		};
+		if(!result.hit){
+			return result;
+		}
+
+		for(std::uint8_t i = 0; i != point_count; ++i){
+			const auto& point = points[i];
+			result.point += point.point;
+			if(i == 0 || point.depth > result.depth){
+				result.depth = point.depth;
+			}
+		}
+		result.point *= 1.f / static_cast<float>(point_count);
+		return result;
+	}
+};
+
+export
 struct time_of_impact_result{
 	bool hit{};
 	float fraction{1.f};
@@ -295,6 +335,271 @@ struct epa_edge{
 	const auto point_b = a.point_b + (b.point_b - a.point_b) * t;
 	return (point_a + point_b) * 0.5f;
 }
+
+static constexpr std::uint8_t support_feature_capacity = 8;
+
+struct support_feature{
+	std::array<math::vec2, support_feature_capacity> points{};
+	std::uint8_t count{};
+	float projection{-std::numeric_limits<float>::infinity()};
+};
+
+[[nodiscard]] constexpr math::vec2 safe_normalized(math::vec2 direction) noexcept{
+	if(direction.length2() <= gjk_epsilon * gjk_epsilon){
+		return {1.f, 0.f};
+	}
+	return direction.normalize();
+}
+
+[[nodiscard]] constexpr math::trans2 combine_transform(const math::trans2 local, const math::trans2 world) noexcept{
+	return local >> world;
+}
+
+[[nodiscard]] constexpr math::vec2 to_local_direction(math::vec2 direction, const math::trans2 transform) noexcept{
+	direction.rotate_rad(-static_cast<float>(transform.rot));
+	return direction;
+}
+
+[[nodiscard]] bool same_feature_point(const math::vec2 lhs, const math::vec2 rhs, const float tolerance) noexcept{
+	return (lhs - rhs).length2() <= tolerance * tolerance;
+}
+
+void append_support_point(
+	support_feature& feature,
+	const math::vec2 point,
+	const math::vec2 direction,
+	const float tolerance) noexcept{
+	const float projection = point.dot(direction);
+	if(feature.count == 0 || projection > feature.projection + tolerance){
+		feature.count = 1;
+		feature.points[0] = point;
+		feature.projection = projection;
+		return;
+	}
+
+	if(std::abs(projection - feature.projection) > tolerance){
+		return;
+	}
+
+	for(std::uint8_t i = 0; i != feature.count; ++i){
+		if(same_feature_point(feature.points[i], point, tolerance)){
+			return;
+		}
+	}
+
+	if(feature.count < support_feature_capacity){
+		feature.points[feature.count++] = point;
+	}
+}
+
+[[nodiscard]] support_feature reduce_feature(
+	const support_feature& feature,
+	const math::vec2 tangent,
+	const float tolerance) noexcept{
+	if(feature.count <= 2){
+		support_feature result = feature;
+		if(result.count == 2 && result.points[1].dot(tangent) < result.points[0].dot(tangent)){
+			std::swap(result.points[0], result.points[1]);
+		}
+		return result;
+	}
+
+	std::uint8_t min_index{};
+	std::uint8_t max_index{};
+	float min_projection = feature.points[0].dot(tangent);
+	float max_projection = min_projection;
+	for(std::uint8_t i = 1; i != feature.count; ++i){
+		const float projection = feature.points[i].dot(tangent);
+		if(projection < min_projection){
+			min_projection = projection;
+			min_index = i;
+		}
+		if(projection > max_projection){
+			max_projection = projection;
+			max_index = i;
+		}
+	}
+
+	support_feature result{
+		.points = {feature.points[min_index], feature.points[max_index]},
+		.count = static_cast<std::uint8_t>(std::abs(max_projection - min_projection) <= tolerance ? 1u : 2u),
+		.projection = feature.projection
+	};
+	return result;
+}
+
+[[nodiscard]] support_feature support_feature_of(
+	const circle_shape& circle,
+	const math::vec2 direction,
+	const math::trans2 transform,
+	const float) noexcept{
+	const auto local_direction = to_local_direction(direction, transform);
+	const auto point = safe_normalized(local_direction) * circle.radius >> transform;
+	return {
+		.points = {point},
+		.count = 1,
+		.projection = point.dot(direction)
+	};
+}
+
+[[nodiscard]] support_feature support_feature_of(
+	const capsule_shape& capsule,
+	const math::vec2 direction,
+	const math::trans2 transform,
+	const float tolerance) noexcept{
+	const auto local_direction = to_local_direction(direction, transform);
+	const auto local_normal = safe_normalized(local_direction);
+	const float begin_projection = capsule.begin.dot(local_direction);
+	const float end_projection = capsule.end.dot(local_direction);
+	support_feature feature{};
+	if(begin_projection >= end_projection - tolerance){
+		append_support_point(feature, (capsule.begin + local_normal * capsule.radius) >> transform, direction, tolerance);
+	}
+	if(end_projection >= begin_projection - tolerance){
+		append_support_point(feature, (capsule.end + local_normal * capsule.radius) >> transform, direction, tolerance);
+	}
+	return feature;
+}
+
+[[nodiscard]] support_feature support_feature_of(
+	const box_shape& box,
+	const math::vec2 direction,
+	const math::trans2 transform,
+	const float tolerance) noexcept{
+	const auto half = box.half_extent;
+	const std::array vertices{
+		math::vec2{-half.x, -half.y},
+		math::vec2{half.x, -half.y},
+		math::vec2{half.x, half.y},
+		math::vec2{-half.x, half.y}
+	};
+	support_feature feature{};
+	for(const auto vertex : vertices){
+		append_support_point(feature, vertex >> transform, direction, tolerance);
+	}
+	return feature;
+}
+
+[[nodiscard]] support_feature support_feature_of(
+	const convex_polygon_shape& polygon,
+	const math::vec2 direction,
+	const math::trans2 transform,
+	const float tolerance) noexcept{
+	support_feature feature{};
+	for(const auto vertex : polygon.vertices){
+		append_support_point(feature, vertex >> transform, direction, tolerance);
+	}
+	return feature;
+}
+
+[[nodiscard]] support_feature support_feature_of(
+	const collision_shape& shape,
+	const math::vec2 direction,
+	const math::trans2 transform,
+	const float tolerance) noexcept{
+	support_feature feature{};
+	shape.visit_parts([&](std::size_t, const auto& component) noexcept{
+		const auto part_transform = combine_transform(component.local_transform, transform);
+		const auto part_feature = support_feature_of(component.shape, direction, part_transform, tolerance);
+		for(std::uint8_t i = 0; i != part_feature.count; ++i){
+			append_support_point(feature, part_feature.points[i], direction, tolerance);
+		}
+	});
+	return feature;
+}
+
+[[nodiscard]] support_feature support_feature_of(
+	const collision_shape_record& shape,
+	const math::vec2 direction,
+	const math::trans2 transform,
+	const float tolerance) noexcept{
+	support_feature feature{};
+	for(const auto& part : shape.records()){
+		const auto part_transform = combine_transform(part.local_transform, transform);
+		support_feature part_feature{};
+		switch(part.type){
+		case shape_type::circle:
+			part_feature = support_feature_of(part.payload.circle, direction, part_transform, tolerance);
+			break;
+		case shape_type::capsule:
+			part_feature = support_feature_of(part.payload.capsule, direction, part_transform, tolerance);
+			break;
+		case shape_type::box:
+			part_feature = support_feature_of(part.payload.box, direction, part_transform, tolerance);
+			break;
+		case shape_type::convex_polygon:{
+			const auto first = shape.polygon_vertices().begin() + part.payload.convex_polygon.vertex_offset;
+			const auto last = first + part.payload.convex_polygon.vertex_count;
+			for(auto current = first; current != last; ++current){
+				append_support_point(part_feature, *current >> part_transform, direction, tolerance);
+			}
+			break;
+		}
+		}
+
+		for(std::uint8_t i = 0; i != part_feature.count; ++i){
+			append_support_point(feature, part_feature.points[i], direction, tolerance);
+		}
+	}
+	return feature;
+}
+
+template <collision_support_shape Shape>
+[[nodiscard]] support_feature support_feature_of(
+	const Shape& shape,
+	const math::vec2 direction,
+	const math::trans2 transform,
+	const float) noexcept{
+	const auto point = shape.support(direction, transform);
+	return {
+		.points = {point},
+		.count = 1,
+		.projection = point.dot(direction)
+	};
+}
+
+[[nodiscard]] math::vec2 point_at_tangent(
+	const support_feature& feature,
+	const math::vec2 tangent,
+	const float tangent_projection) noexcept{
+	if(feature.count <= 1){
+		return feature.points[0];
+	}
+
+	const float begin_projection = feature.points[0].dot(tangent);
+	const float end_projection = feature.points[1].dot(tangent);
+	const float denom = end_projection - begin_projection;
+	if(std::abs(denom) <= gjk_epsilon){
+		return (feature.points[0] + feature.points[1]) * 0.5f;
+	}
+
+	const float t = std::clamp((tangent_projection - begin_projection) / denom, 0.f, 1.f);
+	return feature.points[0] + (feature.points[1] - feature.points[0]) * t;
+}
+
+void append_manifold_point(
+	contact_manifold& manifold,
+	const math::vec2 point_a,
+	const math::vec2 point_b,
+	const float fallback_depth,
+	const float tolerance) noexcept{
+	if(manifold.point_count >= manifold.points.size()){
+		return;
+	}
+
+	const math::vec2 contact = (point_a + point_b) * 0.5f;
+	for(std::uint8_t i = 0; i != manifold.point_count; ++i){
+		if(same_feature_point(manifold.points[i].point, contact, tolerance)){
+			return;
+		}
+	}
+
+	const float depth = std::max((point_a - point_b).dot(manifold.normal), fallback_depth);
+	manifold.points[manifold.point_count++] = {
+		.point = contact,
+		.depth = depth
+	};
+}
 }
 
 export
@@ -309,14 +614,18 @@ template <collision_support_shape ShapeA, collision_support_shape ShapeB>
 		return {};
 	}
 
-	std::vector<support_vertex> polytope{};
-	polytope.reserve(detail::epa_max_iterations + 3);
+	std::array<support_vertex, detail::epa_max_iterations + 3> polytope{};
+	std::size_t polytope_size{};
 	for(std::uint8_t i = 0; i != gjk.final_simplex.count; ++i){
-		polytope.push_back(gjk.final_simplex[i]);
+		polytope[polytope_size++] = gjk.final_simplex[i];
 	}
 
-	if(detail::polygon_area(polytope) < 0.f){
-		std::ranges::reverse(polytope);
+	const auto polytope_span = [&]() noexcept{
+		return std::span<const support_vertex>{polytope.data(), polytope_size};
+	};
+
+	if(detail::polygon_area(polytope_span()) < 0.f){
+		std::ranges::reverse(polytope.begin(), polytope.begin() + static_cast<std::ptrdiff_t>(polytope_size));
 	}
 
 	contact_result result{
@@ -325,7 +634,7 @@ template <collision_support_shape ShapeA, collision_support_shape ShapeB>
 		};
 
 	for(iteration_size_t iteration = 0; iteration != detail::epa_max_iterations; ++iteration){
-		const auto edge = detail::closest_edge(polytope);
+		const auto edge = detail::closest_edge(polytope_span());
 		const auto vertex = physics::support(a, transform_a, b, transform_b, edge.normal);
 		const auto distance = vertex.point.dot(edge.normal);
 
@@ -333,7 +642,7 @@ template <collision_support_shape ShapeA, collision_support_shape ShapeB>
 		result.depth = edge.distance;
 		result.point = detail::interpolate_contact(
 			polytope[edge.index],
-			polytope[(edge.index + 1) % polytope.size()]);
+			polytope[(edge.index + 1) % polytope_size]);
 		result.epa_iterations = iteration + 1;
 
 		if(distance - edge.distance <= detail::epa_tolerance){
@@ -342,7 +651,15 @@ template <collision_support_shape ShapeA, collision_support_shape ShapeB>
 			return result;
 		}
 
-		polytope.insert(polytope.begin() + static_cast<std::ptrdiff_t>(edge.index + 1), vertex);
+		const auto insert_index = static_cast<std::size_t>(edge.index + 1);
+		if(polytope_size >= polytope.size()){
+			return result;
+		}
+		for(std::size_t i = polytope_size; i != insert_index; --i){
+			polytope[i] = polytope[i - 1];
+		}
+		polytope[insert_index] = vertex;
+		++polytope_size;
 	}
 
 	return result;
@@ -361,6 +678,105 @@ template <collision_support_shape ShapeA, collision_support_shape ShapeB>
 	}
 
 	return physics::epa_penetration(a, transform_a, b, transform_b, gjk);
+}
+
+export
+template <collision_support_shape ShapeA, collision_support_shape ShapeB>
+[[nodiscard]] contact_manifold build_contact_manifold(
+	const ShapeA& a,
+	const math::trans2 transform_a,
+	const ShapeB& b,
+	const math::trans2 transform_b,
+	const contact_result& seed) noexcept{
+	if(!seed.hit){
+		return {
+			.gjk_iterations = seed.gjk_iterations,
+			.epa_iterations = seed.epa_iterations,
+			.epa_converged = seed.epa_converged
+		};
+	}
+
+	auto normal = seed.normal;
+	if(normal.length2() > 0.f){
+		normal.normalize();
+	}else{
+		normal = {1.f, 0.f};
+	}
+
+	const math::vec2 tangent{-normal.y, normal.x};
+	const float tolerance = std::max(1.0e-4f, std::abs(seed.depth) * 1.0e-3f);
+	auto feature_a = detail::support_feature_of(a, normal, transform_a, tolerance);
+	auto feature_b = detail::support_feature_of(b, -normal, transform_b, tolerance);
+
+	if(feature_a.count == 0 || feature_b.count == 0){
+		return {
+			.hit = true,
+			.normal = normal,
+			.points = {contact_point{.point = seed.point, .depth = seed.depth}},
+			.point_count = 1,
+			.gjk_iterations = seed.gjk_iterations,
+			.epa_iterations = seed.epa_iterations,
+			.epa_converged = seed.epa_converged
+		};
+	}
+
+	feature_a = detail::reduce_feature(feature_a, tangent, tolerance);
+	feature_b = detail::reduce_feature(feature_b, tangent, tolerance);
+
+	const float a_begin = feature_a.points[0].dot(tangent);
+	const float a_end = feature_a.count == 1 ? a_begin : feature_a.points[1].dot(tangent);
+	const float b_begin = feature_b.points[0].dot(tangent);
+	const float b_end = feature_b.count == 1 ? b_begin : feature_b.points[1].dot(tangent);
+	const float overlap_begin = std::max(std::min(a_begin, a_end), std::min(b_begin, b_end));
+	const float overlap_end = std::min(std::max(a_begin, a_end), std::max(b_begin, b_end));
+
+	contact_manifold manifold{
+		.hit = true,
+		.normal = normal,
+		.gjk_iterations = seed.gjk_iterations,
+		.epa_iterations = seed.epa_iterations,
+		.epa_converged = seed.epa_converged
+	};
+
+	if(overlap_begin <= overlap_end + tolerance){
+		const auto point_a = detail::point_at_tangent(feature_a, tangent, overlap_begin);
+		const auto point_b = detail::point_at_tangent(feature_b, tangent, overlap_begin);
+		detail::append_manifold_point(manifold, point_a, point_b, seed.depth, tolerance);
+
+		if(overlap_end - overlap_begin > tolerance){
+			const auto end_point_a = detail::point_at_tangent(feature_a, tangent, overlap_end);
+			const auto end_point_b = detail::point_at_tangent(feature_b, tangent, overlap_end);
+			detail::append_manifold_point(manifold, end_point_a, end_point_b, seed.depth, tolerance);
+		}
+	}else{
+		const float feature_a_mid = (a_begin + a_end) * 0.5f;
+		const float feature_b_mid = (b_begin + b_end) * 0.5f;
+		const float contact_t = (feature_a_mid + feature_b_mid) * 0.5f;
+		const auto point_a = detail::point_at_tangent(feature_a, tangent, contact_t);
+		const auto point_b = detail::point_at_tangent(feature_b, tangent, contact_t);
+		detail::append_manifold_point(manifold, point_a, point_b, seed.depth, tolerance);
+	}
+
+	if(manifold.point_count == 0){
+		manifold.points[0] = {.point = seed.point, .depth = seed.depth};
+		manifold.point_count = 1;
+	}
+	return manifold;
+}
+
+export
+template <collision_support_shape ShapeA, collision_support_shape ShapeB>
+[[nodiscard]] contact_manifold collide_manifold(
+	const ShapeA& a,
+	const math::trans2 transform_a,
+	const ShapeB& b,
+	const math::trans2 transform_b) noexcept{
+	return physics::build_contact_manifold(
+		a,
+		transform_a,
+		b,
+		transform_b,
+		physics::collide(a, transform_a, b, transform_b));
 }
 
 export

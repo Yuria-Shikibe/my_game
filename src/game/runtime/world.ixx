@@ -3,6 +3,7 @@ export module mo_yanxi.game.runtime.world;
 export import mo_yanxi.game.ecs.component.manage;
 export import mo_yanxi.game.ecs.component.physics;
 export import mo_yanxi.game.ecs.system.physics;
+export import mo_yanxi.game.ecs.system.projectile;
 export import mo_yanxi.game.runtime.draw.collision_shape_component;
 
 import std;
@@ -28,6 +29,7 @@ struct motion_system{
 export
 struct game_systems{
 	motion_system motion{};
+	ecs::system::projectile_system projectile{};
 	ecs::system::physics_system physics{};
 	draw::collision_shape_draw_system collision_shape_draw{};
 
@@ -64,7 +66,9 @@ struct game_world{
 	void run_systems(){
 		component_manager.do_deferred();
 		systems.motion.run(component_manager);
+		systems.projectile.pre_step(component_manager);
 		systems.physics.step(component_manager);
+		systems.projectile.resolve_hits(component_manager, systems.physics);
 		component_manager.do_deferred();
 	}
 
