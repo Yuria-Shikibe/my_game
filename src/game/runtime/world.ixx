@@ -31,7 +31,6 @@ struct game_systems{
 	motion_system motion{};
 	ecs::system::projectile_system projectile{};
 	ecs::system::physics_system physics{};
-	draw::collision_shape_draw_system collision_shape_draw{};
 
 	void clear(){
 		physics.clear();

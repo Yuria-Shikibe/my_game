@@ -1,20 +1,13 @@
 export module mo_yanxi.game.runtime.draw.collision_shape;
 
 export import mo_yanxi.game.physics.shape;
-export import mo_yanxi.graphic.color;
+export import mo_yanxi.game.runtime.draw.collision_shape_style;
 export import mo_yanxi.gui.renderer.frontend;
 export import mo_yanxi.math.trans2;
 
 import std;
 
 namespace mo_yanxi::game::draw{
-export
-struct collision_shape_draw_style{
-	graphic::color color{0.20f, 0.95f, 0.45f, 0.85f};
-	float stroke{1.f};
-	float depth{};
-};
-
 export
 void draw_shape(
 	gui::renderer_frontend& renderer,

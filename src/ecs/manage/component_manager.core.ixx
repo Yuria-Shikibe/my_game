@@ -34,6 +34,7 @@ import mo_yanxi.meta_programming;
 import mo_yanxi.heterogeneous.open_addr_hash;
 
 import mo_yanxi.type_register;
+import mo_yanxi.log;
 
 import std;
 
@@ -1840,7 +1841,7 @@ namespace mo_yanxi::game::ecs{
 		T* ptr = this->template try_get<T>();
 #ifdef COMP_AT_CHECK
 		if(ptr == nullptr){
-			std::println(std::cerr, "[FATAL ERROR] Illegal Access To Chunk<{}> on entity slot<{}:{}>", name_of<T>(), slot_, generation_);
+			log::fatal({"ECS"}, "illegal access to Chunk<{}> on entity slot<{}:{}>", name_of<T>(), slot_, generation_);
 			std::terminate();
 		}
 #endif

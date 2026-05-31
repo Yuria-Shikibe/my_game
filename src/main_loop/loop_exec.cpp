@@ -1,6 +1,5 @@
 module mo_yanxi.gui.game_examples.loop_exec;
 
-import mo_yanxi.game.instance;
 import mo_yanxi.gui.examples.default_config.constants;
 import mo_yanxi.gui.global;
 import std;
@@ -9,12 +8,9 @@ import mo_yanxi.gui.fx.instruction_extension;
 
 void mo_yanxi::gui::example::main_loop_fn(struct main_loop<main_loop_payload>& main_loop){
 	auto& current_focus = main_loop.get_scene();
-	auto deltatime = global::consume_current_input(current_focus, [&](input_handle::input_event_variant e){
-		main_loop.payload.game->handle_event(e);
+	global::consume_current_input(current_focus, [&](input_handle::input_event_variant e){
 		main_loop.unhandled_events.push(e);
 	});
-
-	main_loop.payload.game->update(deltatime.count());
 
 	current_focus.layout();
 
@@ -37,13 +33,6 @@ void mo_yanxi::gui::example::main_loop_fn(struct main_loop<main_loop_payload>& m
 
 	r.update_state(fx::blend::pma::standard);
 	r.update_state(fx::make_blend_write_mask(true), 0);
-
-	mo_yanxi::game::game_render_context render_context{
-		renderer,
-		r,
-		deltatime.count()
-	};
-	main_loop.payload.game->render(render_context);
 
 	current_focus.draw();
 	renderer.batch_host.end_rendering();

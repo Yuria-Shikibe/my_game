@@ -6,7 +6,7 @@ add_rules("mode.debug", "mode.release")
 
 set_arch("x64")
 set_encodings("utf-8")
-set_symbols("debug")
+set_symbols("debug", "embed")
 set_strip("debug")
 
 add_vectorexts("avx", "avx2")
@@ -14,6 +14,7 @@ set_policy("build.warning", true)
 
 if is_plat("windows") then
     set_runtimes(is_mode("debug") and "MDd" or "MD")
+    add_cxxflags("/FS", {tools = {"cl"}})
 else
     set_runtimes("c++_shared")
 end
@@ -120,6 +121,22 @@ target("soa_vector_constexpr_test")
 
     add_files("src/ecs/support/soa_vector.ixx")
     add_files("tests/soa_vector_constexpr_test/main.cpp")
+target_end()
+
+target("object_storage_test")
+    set_kind("binary")
+    set_extension(".exe")
+    set_languages("c++latest")
+    set_default(false)
+
+    add_ecs_entity_port_includes()
+
+    set_warnings("all", "pedantic")
+
+    add_files(path.join(mo_yanxi_utility_dir, "src/utility/generic/type_register.ixx"))
+    add_files("src/ecs/support/soa_vector.ixx")
+    add_files("src/ecs/support/object_storage.ixx")
+    add_files("tests/object_storage_test/main.cpp")
 target_end()
 
 target("physics_core_test")
