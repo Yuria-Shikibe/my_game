@@ -223,20 +223,22 @@ namespace detail{
 }
 }
 
-export
+namespace detail{
 template <collision_support_shape ShapeA, collision_support_shape ShapeB>
 [[nodiscard]] gjk_result gjk_intersect(
 	const ShapeA& a,
-	const math::trans2 transform_a,
+	const math::vec2 origin_a,
+	const math::trans2 support_transform_a,
 	const ShapeB& b,
-	const math::trans2 transform_b) noexcept{
-	math::vec2 direction = transform_b.vec - transform_a.vec;
+	const math::vec2 origin_b,
+	const math::trans2 support_transform_b) noexcept{
+	math::vec2 direction = origin_b - origin_a;
 	if(direction.length2() <= detail::gjk_epsilon * detail::gjk_epsilon){
 		direction = {1.f, 0.f};
 	}
 
 	simplex simplex{};
-	simplex.push_front(physics::support(a, transform_a, b, transform_b, direction));
+	simplex.push_front(physics::support(a, support_transform_a, b, support_transform_b, direction));
 	direction = -simplex[0].point;
 
 	for(unsigned iteration = 0; iteration != detail::gjk_max_iterations; ++iteration){
@@ -244,7 +246,7 @@ template <collision_support_shape ShapeA, collision_support_shape ShapeB>
 			direction = {1.f, 0.f};
 		}
 
-		const support_vertex vertex = physics::support(a, transform_a, b, transform_b, direction);
+		const support_vertex vertex = physics::support(a, support_transform_a, b, support_transform_b, direction);
 		if(vertex.point.dot(direction) < 0.f){
 			return {
 					.intersect = false,
@@ -271,6 +273,23 @@ template <collision_support_shape ShapeA, collision_support_shape ShapeB>
 			.last_direction = direction,
 			.iterations = detail::gjk_max_iterations
 		};
+}
+}
+
+export
+template <collision_support_shape ShapeA, collision_support_shape ShapeB>
+[[nodiscard]] gjk_result gjk_intersect(
+	const ShapeA& a,
+	const math::trans2 transform_a,
+	const ShapeB& b,
+	const math::trans2 transform_b) noexcept{
+	return detail::gjk_intersect(
+		a,
+		transform_a.vec,
+		transform_a,
+		b,
+		transform_b.vec,
+		transform_b);
 }
 
 namespace detail{
@@ -510,38 +529,112 @@ void append_support_point(
 
 [[nodiscard]] support_feature support_feature_of(
 	const collision_shape_record& shape,
+	const collision_shape_record_part& part,
 	const math::vec2 direction,
-	const math::trans2 transform,
+	const collision_shape_query_transform transform,
+	const float tolerance) noexcept{
+	const auto local_direction = transform.rotate_to_local(direction);
+	switch(part.type){
+	case shape_type::circle:{
+		const auto point = transform.apply_to(safe_normalized(local_direction) * part.payload.circle.radius);
+		return {
+			.points = {point},
+			.count = 1,
+			.projection = point.dot(direction)
+		};
+	}
+	case shape_type::capsule:{
+		const auto local_normal = safe_normalized(local_direction);
+		const float begin_projection = part.payload.capsule.begin.dot(local_direction);
+		const float end_projection = part.payload.capsule.end.dot(local_direction);
+		support_feature feature{};
+		if(begin_projection >= end_projection - tolerance){
+			append_support_point(
+				feature,
+				transform.apply_to(part.payload.capsule.begin + local_normal * part.payload.capsule.radius),
+				direction,
+				tolerance);
+		}
+		if(end_projection >= begin_projection - tolerance){
+			append_support_point(
+				feature,
+				transform.apply_to(part.payload.capsule.end + local_normal * part.payload.capsule.radius),
+				direction,
+				tolerance);
+		}
+		return feature;
+	}
+	case shape_type::box:{
+		const auto half = part.payload.box.half_extent;
+		const std::array vertices{
+			math::vec2{-half.x, -half.y},
+			math::vec2{half.x, -half.y},
+			math::vec2{half.x, half.y},
+			math::vec2{-half.x, half.y}
+		};
+		support_feature feature{};
+		for(const auto vertex : vertices){
+			append_support_point(feature, transform.apply_to(vertex), direction, tolerance);
+		}
+		return feature;
+	}
+	case shape_type::convex_polygon:{
+		const auto first = shape.polygon_vertices().begin() + part.payload.convex_polygon.vertex_offset;
+		const auto last = first + part.payload.convex_polygon.vertex_count;
+		support_feature feature{};
+		for(auto current = first; current != last; ++current){
+			append_support_point(feature, transform.apply_to(*current), direction, tolerance);
+		}
+		return feature;
+	}
+	}
+	return {};
+}
+
+[[nodiscard]] support_feature support_feature_of(
+	const collision_shape_record& shape,
+	const math::vec2 direction,
+	const collision_shape_query_transform transform,
 	const float tolerance) noexcept{
 	support_feature feature{};
 	for(const auto& part : shape.records()){
-		const auto part_transform = combine_transform(part.local_transform, transform);
-		support_feature part_feature{};
-		switch(part.type){
-		case shape_type::circle:
-			part_feature = support_feature_of(part.payload.circle, direction, part_transform, tolerance);
-			break;
-		case shape_type::capsule:
-			part_feature = support_feature_of(part.payload.capsule, direction, part_transform, tolerance);
-			break;
-		case shape_type::box:
-			part_feature = support_feature_of(part.payload.box, direction, part_transform, tolerance);
-			break;
-		case shape_type::convex_polygon:{
-			const auto first = shape.polygon_vertices().begin() + part.payload.convex_polygon.vertex_offset;
-			const auto last = first + part.payload.convex_polygon.vertex_count;
-			for(auto current = first; current != last; ++current){
-				append_support_point(part_feature, *current >> part_transform, direction, tolerance);
-			}
-			break;
-		}
-		}
-
+		const auto part_transform = collision_shape_query_transform::combine(part.local_transform, transform);
+		const auto part_feature = support_feature_of(shape, part, direction, part_transform, tolerance);
 		for(std::uint8_t i = 0; i != part_feature.count; ++i){
 			append_support_point(feature, part_feature.points[i], direction, tolerance);
 		}
 	}
 	return feature;
+}
+
+[[nodiscard]] support_feature support_feature_of(
+	const collision_shape_record& shape,
+	const math::vec2 direction,
+	const math::trans2 transform,
+	const float tolerance) noexcept{
+	return support_feature_of(
+		shape,
+		direction,
+		collision_shape_query_transform::make(transform),
+		tolerance);
+}
+
+[[nodiscard]] support_feature support_feature_of(
+	const collision_shape_record_query& shape,
+	const math::vec2 direction,
+	const math::trans2 transform,
+	const float tolerance) noexcept{
+	if(collision_shape_query_transform::is_identity(transform)){
+		return support_feature_of(*shape.shape, direction, shape.transform, tolerance);
+	}
+
+	return support_feature_of(
+		*shape.shape,
+		direction,
+		collision_shape_query_transform::combine(
+			shape.transform.transform,
+			collision_shape_query_transform::make(transform)),
+		tolerance);
 }
 
 template <collision_support_shape Shape>
@@ -681,6 +774,33 @@ template <collision_support_shape ShapeA, collision_support_shape ShapeB>
 }
 
 export
+[[nodiscard]] inline contact_result collide(
+	const collision_shape_record_query& a,
+	const collision_shape_record_query& b) noexcept{
+	const gjk_result gjk = detail::gjk_intersect(
+		a,
+		a.transform.transform.vec,
+		{},
+		b,
+		b.transform.transform.vec,
+		{});
+	if(!gjk.intersect){
+		return {.gjk_iterations = gjk.iterations};
+	}
+
+	return physics::epa_penetration(a, {}, b, {}, gjk);
+}
+
+export
+[[nodiscard]] inline contact_result collide(
+	const collision_shape_record& a,
+	const math::trans2 transform_a,
+	const collision_shape_record& b,
+	const math::trans2 transform_b) noexcept{
+	return physics::collide(a.query(transform_a), b.query(transform_b));
+}
+
+export
 template <collision_support_shape ShapeA, collision_support_shape ShapeB>
 [[nodiscard]] contact_manifold build_contact_manifold(
 	const ShapeA& a,
@@ -779,25 +899,12 @@ template <collision_support_shape ShapeA, collision_support_shape ShapeB>
 		physics::collide(a, transform_a, b, transform_b));
 }
 
-export
-template <collision_support_shape ShapeA, collision_support_shape ShapeB>
-[[nodiscard]] time_of_impact_result linear_time_of_impact(
-	const ShapeA& a,
-	const math::trans2 start_transform_a,
-	const math::trans2 end_transform_a,
-	const ShapeB& b,
-	const math::trans2 start_transform_b,
-	const math::trans2 end_transform_b,
-	const iteration_size_t coarse_steps = 32,
-	const iteration_size_t refine_steps = 8) noexcept{
-	const auto contact_at = [&](const float fraction) noexcept{
-		return physics::collide(
-			a,
-			math::lerp(start_transform_a, end_transform_a, fraction),
-			b,
-			math::lerp(start_transform_b, end_transform_b, fraction));
-	};
-
+namespace detail{
+template <typename ContactAt>
+[[nodiscard]] time_of_impact_result linear_time_of_impact_impl(
+	ContactAt& contact_at,
+	const iteration_size_t coarse_steps,
+	const iteration_size_t refine_steps) noexcept{
 	if(const contact_result start = contact_at(0.f); start.hit){
 		return {
 				.hit = true,
@@ -844,5 +951,47 @@ template <collision_support_shape ShapeA, collision_support_shape ShapeB>
 			.contact = high_contact,
 			.iterations = iterations
 		};
+}
+}
+
+export
+template <collision_support_shape ShapeA, collision_support_shape ShapeB>
+[[nodiscard]] time_of_impact_result linear_time_of_impact(
+	const ShapeA& a,
+	const math::trans2 start_transform_a,
+	const math::trans2 end_transform_a,
+	const ShapeB& b,
+	const math::trans2 start_transform_b,
+	const math::trans2 end_transform_b,
+	const iteration_size_t coarse_steps = 32,
+	const iteration_size_t refine_steps = 8) noexcept{
+	const auto contact_at = [&](const float fraction) noexcept{
+		return physics::collide(
+			a,
+			math::lerp(start_transform_a, end_transform_a, fraction),
+			b,
+			math::lerp(start_transform_b, end_transform_b, fraction));
+	};
+
+	return detail::linear_time_of_impact_impl(contact_at, coarse_steps, refine_steps);
+}
+
+export
+[[nodiscard]] inline time_of_impact_result linear_time_of_impact(
+	const collision_shape_record& a,
+	const math::trans2 start_transform_a,
+	const math::trans2 end_transform_a,
+	const collision_shape_record& b,
+	const math::trans2 start_transform_b,
+	const math::trans2 end_transform_b,
+	const iteration_size_t coarse_steps = 32,
+	const iteration_size_t refine_steps = 8) noexcept{
+	const auto contact_at = [&](const float fraction) noexcept{
+		const auto query_a = a.query(math::lerp(start_transform_a, end_transform_a, fraction));
+		const auto query_b = b.query(math::lerp(start_transform_b, end_transform_b, fraction));
+		return physics::collide(query_a, query_b);
+	};
+
+	return detail::linear_time_of_impact_impl(contact_at, coarse_steps, refine_steps);
 }
 }

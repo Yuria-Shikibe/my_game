@@ -6,7 +6,6 @@ export module mo_yanxi.game.ecs.task_graph;
 
 export import mo_yanxi.game.ecs.component.manage;
 
-import mo_yanxi.open_addr_hash_map;
 import std;
 
 namespace mo_yanxi::concurrent{
@@ -156,7 +155,7 @@ namespace mo_yanxi::concurrent{
 	// 		/**
 	// 		 * @brief branch node -> [child, ...]
 	// 		 */
-	// 		pointer_hash_map<const task*, small_vector_of<const task*>> branches{};
+	// 		std::unordered_map<const task*, small_vector_of<const task*>> branches{};
 	// 	};
 	//
 	//
@@ -260,7 +259,7 @@ namespace mo_yanxi::concurrent{
 	//
 	// 			{
 	// 				//set pivot latches
-	// 				pointer_hash_map<const task*, std::size_t> pivots{};
+	// 				std::unordered_map<const task*, std::size_t> pivots{};
 	//
 	// 				for (auto& seq : task_group.sequences){
 	// 					total_count_ += seq.seq.size();
@@ -423,7 +422,7 @@ namespace mo_yanxi::concurrent{
 	// 	[[nodiscard]] task_group to_sorted_group() const {
 	// 		task_group groups{};
 	//
-	// 		pointer_hash_map<const task*, std::size_t> in_degree{};
+	// 		std::unordered_map<const task*, std::size_t> in_degree{};
 	// 		std::vector<const task*> global_zero_in_degree_queue{};
 	//
 	// 		for (auto&& [id, tsk] : tasks) {
@@ -471,11 +470,11 @@ namespace mo_yanxi::concurrent{
 	// 	}
 	//
 	// private:
-	// 	pointer_hash_map<const task*, task_group> gen_impl() const{
-	// 		pointer_hash_map<const task*, const task*> union_set_to_destination{};
-	// 		pointer_hash_map<const task*, task_group> groups{};
+	// 	std::unordered_map<const task*, task_group> gen_impl() const{
+	// 		std::unordered_map<const task*, const task*> union_set_to_destination{};
+	// 		std::unordered_map<const task*, task_group> groups{};
 	//
-	// 		pointer_hash_map<const task*, std::size_t> in_degree{};
+	// 		std::unordered_map<const task*, std::size_t> in_degree{};
 	// 		std::vector<const task*> global_zero_in_degree_queue{};
 	//
 	// 		auto union_set_find = [&](this auto&& self, const task* t) -> const  task*{

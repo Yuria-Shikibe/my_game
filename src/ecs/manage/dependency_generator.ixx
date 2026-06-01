@@ -5,8 +5,6 @@ module;
 
 export module mo_yanxi.game.ecs.dependency_generator;
 
-import mo_yanxi.open_addr_hash_map;
-
 import std;
 
 namespace mo_yanxi::concurrent{

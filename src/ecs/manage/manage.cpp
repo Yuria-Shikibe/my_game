@@ -12,7 +12,10 @@ namespace mo_yanxi::game::ecs{
 	}
 
 	void component_pack::write(std::ostream& stream) const{
-		std::uint32_t chunk_count = chunks.size();
+		if(chunks.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())){
+			throw std::length_error{"component pack chunk count exceeds uint32_t"};
+		}
+		std::uint32_t chunk_count = static_cast<std::uint32_t>(chunks.size());
 		swapbyte_if_needed(chunk_count);
 		stream.write(reinterpret_cast<const char*>(&chunk_count), sizeof(chunk_count));
 

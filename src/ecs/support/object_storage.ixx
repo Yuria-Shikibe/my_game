@@ -422,107 +422,26 @@ protected:
 	[[nodiscard]] virtual std::span<Common> common_span_impl() noexcept = 0;
 };
 
-export template <typename Object, typename Context, typename Common = object_common>
-	requires object_common_like<Common>
-struct object_channel_typed_base : object_channel_base<Context, Common>{
-	[[nodiscard]] virtual object_handle emplace_value(Common common, Object&& object) = 0;
-
-	[[nodiscard]] Object* try_get(const object_handle handle) noexcept{
-		return this->try_get_impl(handle);
-	}
-
-	[[nodiscard]] const Object* try_get(const object_handle handle) const noexcept{
-		return const_cast<object_channel_typed_base*>(this)->try_get_impl(handle);
-	}
-
-	[[nodiscard]] std::span<Object> object_span() noexcept{
-		return this->object_span_impl();
-	}
-
-	[[nodiscard]] std::span<const Object> object_span() const noexcept{
-		return const_cast<object_channel_typed_base*>(this)->object_span_impl();
-	}
-
-protected:
-	[[nodiscard]] virtual Object* try_get_impl(object_handle handle) noexcept = 0;
-	[[nodiscard]] virtual std::span<Object> object_span_impl() noexcept = 0;
-};
-
 struct slot_record{
 	std::uint32_t row{};
 	std::uint64_t generation{1};
 	bool alive{};
 };
 
-export template <typename Object, typename Context, typename System, typename Common = object_common>
-	requires object_common_like<Common> && object_update_system<System, Context, Object, Common>
-struct object_channel final : object_channel_typed_base<Object, Context, Common>{
+export template <typename Object, typename Context, typename Common = object_common>
+	requires object_common_like<Common>
+struct object_channel_typed_base : object_channel_base<Context, Common>{
 	using storage_type = soa_vector<std::allocator<std::byte>, Common, Object>;
 	using size_type = storage_type::size_type;
 
 private:
-	using event_handler_fn = object_event_delivery_result (*)(
-		System&,
-		Context&,
-		Common&,
-		Object&,
-		const void*);
-
-	static constexpr size_type invalid_row = std::numeric_limits<size_type>::max();
+	static constexpr size_type invalid_row_value = std::numeric_limits<size_type>::max();
 
 	std::uint32_t channel_index_{};
 	storage_type storage_{};
 	std::vector<slot_record> slots_{};
 	std::vector<std::uint32_t> row_to_slot_{};
 	std::vector<std::uint32_t> free_slots_{};
-	std::flat_map<type_identity_index, event_handler_fn> event_handlers_{};
-	ADAPTED_NO_UNIQUE_ADDRESS System system_{};
-
-	template <typename Event>
-	void register_event_handler(){
-		static_assert(
-				object_event_system<System, Context, Object, Common, Event>,
-				"Each event in System::object_events must have operator()(Context&, Common&, Object&, const Event&).")
-			;
-
-		event_handlers_.emplace(
-			mo_yanxi::unstable_type_identity_of<Event>(),
-			+[](System& system, Context& context, Common& common, Object& object, const void* payload){
-				return system.operator()(
-					context,
-					common,
-					object,
-					*std::launder(static_cast<const Event*>(payload)));
-			});
-	}
-	template <typename Event, typename Fn>
-		requires (std::is_empty_v<Fn> && std::is_invocable_r_v<object_event_delivery_result, Fn, System&, Context&, Common&, Object&, const Event&>)
-	void register_event_handler(Fn fn){
-		event_handlers_.emplace(
-			mo_yanxi::unstable_type_identity_of<Event>(),
-			+[](System& system, Context& context, Common& common, Object& object, const void* payload){
-				return Fn{}(
-					system,
-					context,
-					common,
-					object,
-					*std::launder(static_cast<const Event*>(payload)));
-			});
-	}
-
-	template <typename... Events>
-	void register_event_handlers(object_event_set<Events...>){
-		(this->register_event_handler<Events>(), ...);
-	}
-
-	void register_default_event_handlers(){
-		if constexpr(detail::has_object_events<System>){
-			static_assert(
-				detail::is_object_event_set_v<typename System::object_events>,
-				"System::object_events must be object_event_set<...>.");
-			this->register_event_handlers(typename System::object_events{});
-		}
-	}
 
 	[[nodiscard]] std::uint32_t acquire_slot(const size_type row){
 		if(!free_slots_.empty()){
@@ -549,7 +468,7 @@ private:
 
 	void release_failed_slot(const std::uint32_t slot) noexcept{
 		slot_record& record = slots_[slot];
-		record.row = invalid_row;
+		record.row = invalid_row_value;
 		record.alive = false;
 		try{
 			free_slots_.push_back(slot);
@@ -566,6 +485,19 @@ private:
 			};
 	}
 
+	void update_moved_row(const size_type row) noexcept{
+		const std::uint32_t slot = row_to_slot_[row];
+		slots_[slot].row = row;
+		storage_.template get<Common>(row).handle = this->make_handle(slot);
+	}
+
+protected:
+	static constexpr size_type invalid_row = invalid_row_value;
+
+	[[nodiscard]] explicit object_channel_typed_base(const std::uint32_t channel_index) noexcept
+		: channel_index_(channel_index){
+	}
+
 	[[nodiscard]] size_type row_index_of(const object_handle handle) const noexcept{
 		if(handle.channel != channel_index_ || handle.slot >= slots_.size()){
 			return invalid_row;
@@ -578,14 +510,19 @@ private:
 		return record.row;
 	}
 
-	void update_moved_row(const size_type row) noexcept{
-		const std::uint32_t slot = row_to_slot_[row];
-		slots_[slot].row = row;
-		storage_.template get<Common>(row).handle = this->make_handle(slot);
+	[[nodiscard]] size_type storage_size() const noexcept{
+		return storage_.size();
 	}
 
-protected:
-	[[nodiscard]] Common* try_common_impl(const object_handle handle) noexcept override{
+	[[nodiscard]] Common& common_at(const size_type row) noexcept{
+		return storage_.template get<Common>(row);
+	}
+
+	[[nodiscard]] Object& object_at(const size_type row) noexcept{
+		return storage_.template get<Object>(row);
+	}
+
+	[[nodiscard]] Common* try_common_impl(const object_handle handle) noexcept final{
 		const size_type row = this->row_index_of(handle);
 		if(row == invalid_row){
 			return nullptr;
@@ -593,46 +530,28 @@ protected:
 		return std::addressof(storage_.template get<Common>(row));
 	}
 
-	[[nodiscard]] Object* try_get_impl(const object_handle handle) noexcept override{
-		const size_type row = this->row_index_of(handle);
-		if(row == invalid_row){
-			return nullptr;
-		}
-		return std::addressof(storage_.template get<Object>(row));
-	}
-
-	[[nodiscard]] std::span<Common> common_span_impl() noexcept override{
+	[[nodiscard]] std::span<Common> common_span_impl() noexcept final{
 		return storage_.template column<Common>();
 	}
 
-	[[nodiscard]] std::span<Object> object_span_impl() noexcept override{
-		return storage_.template column<Object>();
-	}
-
 public:
-	[[nodiscard]] explicit object_channel(const std::uint32_t channel_index, System system = {})
-		: channel_index_(channel_index),
-		  system_(std::move(system)){
-		this->register_default_event_handlers();
-	}
-
-	[[nodiscard]] type_identity_index object_type() const noexcept override{
+	[[nodiscard]] type_identity_index object_type() const noexcept final{
 		return mo_yanxi::unstable_type_identity_of<Object>();
 	}
 
-	[[nodiscard]] std::uint32_t channel_index() const noexcept override{
+	[[nodiscard]] std::uint32_t channel_index() const noexcept final{
 		return channel_index_;
 	}
 
-	[[nodiscard]] std::size_t size() const noexcept override{
+	[[nodiscard]] std::size_t size() const noexcept final{
 		return storage_.size();
 	}
 
-	[[nodiscard]] bool contains(const object_handle handle) const noexcept override{
+	[[nodiscard]] bool contains(const object_handle handle) const noexcept final{
 		return this->row_index_of(handle) != invalid_row;
 	}
 
-	[[nodiscard]] object_handle emplace_value(Common common, Object&& object) override{
+	[[nodiscard]] object_handle emplace_value(Common common, Object&& object){
 		const size_type row = storage_.size();
 		const std::uint32_t slot = this->acquire_slot(row);
 		const object_handle handle = this->make_handle(slot);
@@ -654,7 +573,27 @@ public:
 		return handle;
 	}
 
-	bool erase(const object_handle handle) override{
+	[[nodiscard]] Object* try_get(const object_handle handle) noexcept{
+		const size_type row = this->row_index_of(handle);
+		if(row == invalid_row){
+			return nullptr;
+		}
+		return std::addressof(storage_.template get<Object>(row));
+	}
+
+	[[nodiscard]] const Object* try_get(const object_handle handle) const noexcept{
+		return const_cast<object_channel_typed_base*>(this)->try_get(handle);
+	}
+
+	[[nodiscard]] std::span<Object> object_span() noexcept{
+		return storage_.template column<Object>();
+	}
+
+	[[nodiscard]] std::span<const Object> object_span() const noexcept{
+		return const_cast<object_channel_typed_base*>(this)->object_span();
+	}
+
+	bool erase(const object_handle handle) final{
 		const size_type row = this->row_index_of(handle);
 		if(row == invalid_row){
 			return false;
@@ -677,13 +616,85 @@ public:
 		free_slots_.push_back(erased_slot);
 		return true;
 	}
+};
+
+export template <typename Object, typename Context, typename System, typename Common = object_common>
+	requires object_common_like<Common> && object_update_system<System, Context, Object, Common>
+struct object_channel final : object_channel_typed_base<Object, Context, Common>{
+	using base_type = object_channel_typed_base<Object, Context, Common>;
+	using size_type = base_type::size_type;
+
+	static_assert(std::is_object_v<System>);
+private:
+	using event_handler_fn = object_event_delivery_result (*)(
+		System&,
+		Context&,
+		Common&,
+		Object&,
+		const void*);
+
+	std::flat_map<type_identity_index, event_handler_fn> event_handlers_{};
+	ADAPTED_NO_UNIQUE_ADDRESS System system_{};
+
+	template <typename Event>
+	void register_event_handler(){
+		static_assert(
+				object_event_system<System, Context, Object, Common, Event>,
+				"Each event in System::object_events must have operator()(Context&, Common&, Object&, const Event&).")
+			;
+
+		event_handlers_.emplace(
+			mo_yanxi::unstable_type_identity_of<Event>(),
+			+[](System& system, Context& context, Common& common, Object& object, const void* payload) -> object_event_delivery_result{
+				return system.operator()(
+					context,
+					common,
+					object,
+					*std::launder(static_cast<const Event*>(payload)));
+			});
+	}
+	template <typename Event, typename Fn>
+		requires (std::is_empty_v<Fn> && std::is_invocable_r_v<object_event_delivery_result, Fn, System&, Context&, Common&, Object&, const Event&>)
+	void register_event_handler(Fn fn){
+		event_handlers_.emplace(
+			mo_yanxi::unstable_type_identity_of<Event>(),
+			+[](System& system, Context& context, Common& common, Object& object, const void* payload) -> object_event_delivery_result{
+				return Fn{}(
+					system,
+					context,
+					common,
+					object,
+					*std::launder(static_cast<const Event*>(payload)));
+			});
+	}
+
+	template <typename... Events>
+	void register_event_handlers(object_event_set<Events...>){
+		(this->register_event_handler<Events>(), ...);
+	}
+
+	void register_default_event_handlers(){
+		if constexpr(detail::has_object_events<System>){
+			static_assert(
+				detail::is_object_event_set_v<typename System::object_events>,
+				"System::object_events must be object_event_set<...>.");
+			this->register_event_handlers(typename System::object_events{});
+		}
+	}
+
+public:
+	[[nodiscard]] explicit object_channel(const std::uint32_t channel_index, System system = {})
+		: base_type(channel_index),
+		  system_(std::move(system)){
+		this->register_default_event_handlers();
+	}
 
 	void update_all(Context& context) override{
-		for(size_type row = 0; row != storage_.size(); ++row){
+		for(size_type row = 0; row != this->storage_size(); ++row){
 			system_.update(
 				context,
-				storage_.template get<Common>(row),
-				storage_.template get<Object>(row));
+				this->common_at(row),
+				this->object_at(row));
 		}
 	}
 
@@ -693,7 +704,7 @@ public:
 		const type_identity_index event_type,
 		const void* event_payload) override{
 		const size_type row = this->row_index_of(target);
-		if(row == invalid_row){
+		if(row == base_type::invalid_row){
 			return object_event_delivery_result::expired_target;
 		}
 
@@ -705,8 +716,8 @@ public:
 		return it->second(
 			system_,
 			context,
-			storage_.template get<Common>(row),
-			storage_.template get<Object>(row),
+			this->common_at(row),
+			this->object_at(row),
 			event_payload);
 	}
 };
@@ -743,8 +754,8 @@ public:
 	}
 
 	template <typename Object, typename System>
-		requires object_update_system<System, Context, Object, Common>
-	object_channel<Object, Context, System, Common>& register_channel(System system){
+		requires object_update_system<std::decay_t<System>, Context, Object, Common>
+	object_channel<Object, Context, std::decay_t<System>, Common>& register_channel(System&& system){
 		const auto type = mo_yanxi::unstable_type_identity_of<Object>();
 		if(type_to_channel_.contains(type)){
 			throw std::logic_error{"object channel is already registered"};
@@ -755,7 +766,7 @@ public:
 		}
 
 		const auto channel_index = static_cast<std::uint32_t>(channels_.size());
-		auto channel = std::make_unique<object_channel<Object, Context, System, Common>>(channel_index, std::move(system));
+		auto channel = std::make_unique<object_channel<Object, Context, std::decay_t<System>, Common>>(channel_index, std::forward<System>(system));
 		auto* result = channel.get();
 		type_to_channel_.emplace(type, result);
 		try{
@@ -880,6 +891,30 @@ public:
 			}
 		}
 		return objects.size();
+	}
+
+	template <typename Fn>
+	std::size_t for_each_common(Fn&& fn){
+		std::size_t visited{};
+		for(auto& channel : channels_){
+			for(Common& common : channel->common_span()){
+				std::invoke(fn, common);
+				++visited;
+			}
+		}
+		return visited;
+	}
+
+	template <typename Fn>
+	std::size_t for_each_common(Fn&& fn) const{
+		std::size_t visited{};
+		for(const auto& channel : channels_){
+			for(const Common& common : channel->common_span()){
+				std::invoke(fn, common);
+				++visited;
+			}
+		}
+		return visited;
 	}
 
 	void update_all(Context& context){

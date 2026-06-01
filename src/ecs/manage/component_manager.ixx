@@ -10,7 +10,6 @@ export module mo_yanxi.game.ecs.component.manage;
 export import :entity;
 export import :misc;
 export import :serializer;
-export import mo_yanxi.heterogeneous.open_addr_hash;
 export import mo_yanxi.strided_span;
 
 import mo_yanxi.concepts;

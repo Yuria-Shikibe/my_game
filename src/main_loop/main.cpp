@@ -47,6 +47,7 @@ import mo_yanxi.react_flow;
 
 import mo_yanxi.core.platform;
 
+import mo_yanxi.game.profile.runtime;
 import mo_yanxi.gui.default_config.main_loop;
 import mo_yanxi.gui.examples.default_config.colored_cerr;
 import mo_yanxi.gui.examples.default_config.font_styles;
@@ -130,16 +131,24 @@ void game_trace(std::string_view message){
 	mo_yanxi::log::trace({"GameTrace"}, "{}", message);
 }
 
-template <typename BeginGameRender, typename WaitGameRender, typename GetGameCommandBuffer, typename SetGameGpuFence>
+template <
+	typename AdvanceGame,
+	typename BeginGameRender,
+	typename WaitGameRender,
+	typename GetGameCommandBuffer,
+	typename SetGameGpuFence>
 void app_run(
 	mo_yanxi::gui::example::main_loop_type& main_loop,
 	std::vector<mo_yanxi::vk::command_buffer>& compositor_cmds,
+	AdvanceGame&& advance_game,
 	BeginGameRender&& begin_game_render,
 	WaitGameRender&& wait_game_render,
 	GetGameCommandBuffer&& get_game_command_buffer,
-	SetGameGpuFence&& set_game_gpu_fence
+	SetGameGpuFence&& set_game_gpu_fence,
+	std::shared_ptr<mo_yanxi::game::profile::profile_session> profile_session
 ){
 	using namespace mo_yanxi;
+	using profile_clock = std::chrono::steady_clock;
 
 	backend::application_timer timer{backend::application_timer<double>::get_default()};
 
@@ -150,36 +159,72 @@ void app_run(
 
 	auto& ctx = main_loop.get_ctx();
 	std::uint64_t frame_index{};
+	auto* profile_output = profile_session.get();
 	while(!ctx.window().should_close()){
 		const auto current_frame = frame_index++;
+		game::profile::profile_main_frame_metrics profile_metrics{
+			.frame_index = current_frame
+		};
+		const auto frame_begin_time = profile_clock::now();
+		auto phase_begin_time = frame_begin_time;
+		auto record_profile_phase = [&](double& out){
+			if(profile_output == nullptr){
+				return;
+			}
+			const auto now = profile_clock::now();
+			out = std::chrono::duration<double, std::milli>(now - phase_begin_time).count();
+			phase_begin_time = now;
+		};
 		game_trace(std::format("frame {}: begin", current_frame));
 		ctx.window().poll_events();
 		timer.fetch_time();
+		const auto frame_delta = timer.global_delta();
+		profile_metrics.delta_seconds = static_cast<double>(frame_delta);
+		record_profile_phase(profile_metrics.poll_events_ms);
 		//
-		gui::global::event_queue.push_frame_split(timer.global_delta());
+		gui::global::event_queue.push_frame_split(frame_delta);
+		std::invoke(advance_game, static_cast<double>(frame_delta));
+		record_profile_phase(profile_metrics.advance_game_ms);
 		game_trace(std::format("frame {}: acquiring output", current_frame));
 		auto output_token = ctx.acquire_output_frame();
+		record_profile_phase(profile_metrics.acquire_ms);
 		if(!output_token.acquired){
 			game_trace(std::format("frame {}: acquire skipped", current_frame));
+			if(profile_output != nullptr){
+				profile_metrics.acquired = false;
+				profile_metrics.total_frame_ms = std::chrono::duration<double, std::milli>(
+					profile_clock::now() - frame_begin_time).count();
+				profile_output->write_frame(profile_metrics);
+				if(profile_output->should_stop_after_frame(current_frame)){
+					break;
+				}
+			}
 			continue;
 		}
+		profile_metrics.acquired = true;
+		profile_metrics.image_index = output_token.image.index;
 		game_trace(std::format("frame {}: acquired image {}", current_frame, output_token.image.index));
 
 		game_trace(std::format("frame {}: request game render begin", current_frame));
 		const auto game_render_request = std::invoke(begin_game_render);
+		record_profile_phase(profile_metrics.request_game_render_ms);
 		game_trace(std::format("frame {}: request game render end {}", current_frame, game_render_request));
 		game_trace(std::format("frame {}: permit burst begin", current_frame));
 		main_loop.permit_burst();
+		record_profile_phase(profile_metrics.permit_burst_ms);
 		game_trace(std::format("frame {}: permit burst end", current_frame));
 		game_trace(std::format("frame {}: consume async queue begin", current_frame));
 		current_focus.get_output_communicate_async_task_queue(0).consume();
+		record_profile_phase(profile_metrics.consume_async_queue_ms);
 		game_trace(std::format("frame {}: consume async queue end", current_frame));
 
 		game_trace(std::format("frame {}: wait term begin", current_frame));
 		main_loop.wait_term();
+		record_profile_phase(profile_metrics.wait_gui_ms);
 		game_trace(std::format("frame {}: wait term end", current_frame));
 		game_trace(std::format("frame {}: wait game render begin {}", current_frame, game_render_request));
 		std::invoke(wait_game_render, game_render_request);
+		record_profile_phase(profile_metrics.wait_game_render_ms);
 		game_trace(std::format("frame {}: wait game render end {}", current_frame, game_render_request));
 
 		std::array<VkCommandBuffer, 3> buffers{
@@ -196,19 +241,32 @@ void app_run(
 			VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
 			output_token.render_finished_semaphore,
 			VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+		record_profile_phase(profile_metrics.submit_ms);
 		game_trace(std::format("frame {}: submit end image {}", current_frame, output_token.image.index));
 		main_loop.get_renderer().set_current_external_submit_fence(output_token.frame_fence);
 		std::invoke(set_game_gpu_fence, output_token.frame_fence);
 		game_trace(std::format("frame {}: present begin image {}", current_frame, output_token.image.index));
 		ctx.present_output_frame(output_token);
+		record_profile_phase(profile_metrics.present_ms);
 		game_trace(std::format("frame {}: present end image {}", current_frame, output_token.image.index));
 		game_trace(std::format("frame {}: reset term begin", current_frame));
 		main_loop.reset_term();
+		record_profile_phase(profile_metrics.reset_term_ms);
 		game_trace(std::format("frame {}: reset term end", current_frame));
+		if(profile_output != nullptr){
+			profile_metrics.total_frame_ms = std::chrono::duration<double, std::milli>(
+				profile_clock::now() - frame_begin_time).count();
+			profile_output->write_frame(profile_metrics);
+			if(profile_output->should_stop_after_frame(current_frame)){
+				break;
+			}
+		}
 	}
 }
 
-void prepare(mo_yanxi::backend::vulkan::context& ctx){
+void prepare(
+	mo_yanxi::backend::vulkan::context& ctx,
+	std::shared_ptr<mo_yanxi::game::profile::profile_session> profile_session){
 	using namespace mo_yanxi;
 	using namespace graphic;
 
@@ -469,6 +527,7 @@ void prepare(mo_yanxi::backend::vulkan::context& ctx){
 		sampler_ui,
 		shader_spv_path
 	};
+	game_renderer.set_profile_session(profile_session);
 
 	auto& ui_input_base = manager.add_external_resource(compositor::resource_entity_external{
 			compositor::image_entity{}, compositor::resource_dependency{
@@ -484,12 +543,7 @@ void prepare(mo_yanxi::backend::vulkan::context& ctx){
 			}
 		});
 
-	auto& input_background = manager.add_external_resource(compositor::resource_entity_external{
-			compositor::image_entity{}, compositor::resource_dependency{
-				.src_access = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-				.dst_access = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-			}
-		});
+	auto& input_background = manager.add_external_resource(game_renderer.make_output_resource());
 
 	auto& present_output = manager.add_external_resource(compositor::resource_entity_external{
 			compositor::image_entity{}, compositor::resource_dependency{
@@ -573,7 +627,7 @@ void prepare(mo_yanxi::backend::vulkan::context& ctx){
 	game_renderer.resize({64, 64});
 	ui_input_base.resource = compositor::image_entity{.handle = renderer.get_blit_attachments()[0]};
 	ui_input_back.resource = compositor::image_entity{.handle = renderer.get_blit_attachments()[1]};
-	input_background.resource = compositor::image_entity{.handle = game_renderer.get_output()};
+	input_background = game_renderer.make_output_resource();
 	manager.set_frame_count(ctx.output_image_count());
 	pass_present.data.set_output_format(ctx.output_image(0).format);
 	for(std::uint32_t frame_slot = 0; frame_slot < ctx.output_image_count(); ++frame_slot){
@@ -697,11 +751,19 @@ void prepare(mo_yanxi::backend::vulkan::context& ctx){
 
 	log::info({"GUI"}, "async scene setup done");
 	game_trace("prepare: async scene setup done");
+	if(profile_session != nullptr){
+		main_loop.payload.game->configure_profile(profile_session->config().scenario, profile_session);
+		log::info(
+			{"Profile"},
+			"profile enabled: config={} output={}",
+			profile_session->config().config_path.string(),
+			profile_session->output_dir().string());
+	}
 	main_loop.payload.game->initialize();
 	game_trace("prepare: game initialized");
 
-	game_renderer.set_snapshot_provider([&]{
-		return main_loop.payload.game->latest_render_snapshot();
+	game_renderer.set_frame_builder([&](game::game_2d_renderer& renderer, const math::vec2 extent){
+		return main_loop.payload.game->render_frame(renderer, extent);
 	});
 	game_renderer.start();
 	game_trace("prepare: game renderer started");
@@ -750,12 +812,12 @@ void prepare(mo_yanxi::backend::vulkan::context& ctx){
 
 		game_renderer.with_render_lock([&]{
 			game_renderer.resize(event.size);
-			input_background.resource = compositor::image_entity{.handle = game_renderer.get_output()};
+			input_background = game_renderer.make_output_resource();
 			rebuild_post_process_commands(context, event.size);
 		});
 	});
 
-	app_run(main_loop, post_process_cmds, [&]{
+	app_run(main_loop, post_process_cmds, [&](const double delta_seconds){
 		if(const auto events = main_loop.unhandled_events.fetch()){
 			for(const auto event : *events){
 				main_loop.payload.game->handle_event(event);
@@ -763,7 +825,9 @@ void prepare(mo_yanxi::backend::vulkan::context& ctx){
 		}
 
 		const auto extent = math::vector2{ctx.get_extent().width, ctx.get_extent().height}.as<float>();
-		main_loop.payload.game->render(extent);
+		main_loop.payload.game->update_for_render(extent, delta_seconds);
+	}, [&]{
+		const auto extent = math::vector2{ctx.get_extent().width, ctx.get_extent().height}.as<float>();
 		return game_renderer.request_full_frame(extent);
 	}, [&](const std::uint64_t game_render_request){
 		game_renderer.wait_frame(game_render_request);
@@ -771,7 +835,7 @@ void prepare(mo_yanxi::backend::vulkan::context& ctx){
 		return game_renderer.get_valid_cmd_buf();
 	}, [&](const VkFence fence){
 		game_renderer.set_external_gpu_fence(fence);
-	});
+	}, profile_session);
 	game_renderer.stop();
 	main_loop.payload.game->shutdown();
 
@@ -788,12 +852,29 @@ void prepare(mo_yanxi::backend::vulkan::context& ctx){
 	ctx.wait_on_device();
 }
 
-int game_main(){
+int game_main(int argc, char** argv){
 	using namespace mo_yanxi;
 	using namespace graphic;
 
-	//auto _cerr = make_colored_errc();
+	const auto profile_command_line = game::profile::parse_profile_command_line(argc, argv);
+	if(profile_command_line.help_requested){
+		std::print("{}", game::profile::profile_help_text());
+		return 0;
+	}
+
+	std::shared_ptr<game::profile::profile_session> profile_session{};
+	if(profile_command_line.config_path){
+		auto profile_config = game::profile::load_profile_config(
+			*profile_command_line.config_path,
+			profile_command_line.output_dir_override);
+		profile_session = std::make_shared<game::profile::profile_session>(std::move(profile_config));
+	}
+
 	game_initialize_logging();
+	if(profile_session != nullptr){
+		mo_yanxi::log::add_file_sink(profile_session->output_dir() / "game.log");
+		mo_yanxi::log::set_min_level(mo_yanxi::log::parse_level(profile_session->config().run.log_level));
+	}
 	game_configure_runtime_working_directory();
 	game_trace(std::format("main: cwd {}", std::filesystem::current_path().string()));
 
@@ -840,19 +921,22 @@ int game_main(){
 		vk::load_ext(ctx.get_instance());
 		vk::register_default_requirements(ctx.get_device(), ctx.get_physical_device());
 
-		prepare(ctx);
+		prepare(ctx, profile_session);
 	}
 
 	backend::glfw::terminate();
 	font::terminate();
 	platform::terminate();
+	if(profile_session != nullptr){
+		profile_session->close();
+	}
 
 	return 0;
 }
 
-int main(){
+int main(int argc, char** argv){
 	try{
-		return game_main();
+		return game_main(argc, argv);
 	} catch(const std::exception& exception){
 		mo_yanxi::log::fatal({"Fatal"}, "unhandled exception: {}", exception.what());
 		return 1;

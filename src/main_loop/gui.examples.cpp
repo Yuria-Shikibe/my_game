@@ -46,7 +46,6 @@ import mo_yanxi.font;
 import mo_yanxi.font.manager;
 import mo_yanxi.graphic.color;
 import mo_yanxi.graphic.msdf;
-import mo_yanxi.heterogeneous.open_addr_hash;
 import align;
 
 import mo_yanxi.typesetting;
@@ -65,6 +64,7 @@ import mo_yanxi.gui.style.progress_bars;
 import mo_yanxi.gui.style.palette;
 
 import mo_yanxi.gui.assets.manager;
+import mo_yanxi.game.ui.collision_shape_editor;
 
 import mo_yanxi.backend.communicator;
 import mo_yanxi.backend.vulkan.context;
@@ -229,6 +229,10 @@ ui_outputs build_main_ui(backend::vulkan::context& ctx, renderer_frontend render
 
 	auto make_create_table = [&] -> std::vector<test_entry>{
 		std::vector<test_entry> tests{
+				test_entry{
+					"collision shapes", [](mo_yanxi::game::ui::collision_shape_editor& editor){
+					}
+				},
 				test_entry{
 					"layout test", [](scroll_adaptor<table>& pane){
 						pane.set_style();

@@ -1,5 +1,6 @@
 export module mo_yanxi.game.runtime.draw.collision_shape_style;
 
+export import mo_yanxi.math.vector4;
 export import mo_yanxi.graphic.color;
 
 namespace mo_yanxi::game::draw{

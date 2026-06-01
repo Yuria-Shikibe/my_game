@@ -11,6 +11,14 @@ import std;
 
 namespace mo_yanxi::game::ecs::system{
 	export
+	struct physics_system_statistics{
+		std::size_t proxy_count{};
+		std::size_t candidate_pair_count{};
+		std::size_t contact_constraint_count{};
+		std::size_t contact_event_count{};
+	};
+
+	export
 	struct physics_system{
 	private:
 		struct physics_proxy{
@@ -22,6 +30,7 @@ namespace mo_yanxi::game::ecs::system{
 			math::uniform_trans2 current_motion_transform{};
 			math::trans2 previous_shape_transform{};
 			math::trans2 current_shape_transform{};
+			physics::collision_shape_record_query current_shape_query{};
 			math::frect aabb{};
 			math::frect broadphase_aabb{};
 			float solved_toi{1.f};
@@ -97,6 +106,7 @@ namespace mo_yanxi::game::ecs::system{
 		std::flat_set<physics_contact_key> current_contacts_{};
 		std::unordered_map<physics_contact_key, contact_cache_entry> contact_cache_{};
 		std::unordered_map<physics_contact_key, contact_cache_entry> next_contact_cache_{};
+		physics_system_statistics last_statistics_{};
 
 		static constexpr float drag_linear_stop_speed{0.005f};
 		static constexpr float drag_angular_stop_speed{0.005f};
@@ -155,6 +165,7 @@ namespace mo_yanxi::game::ecs::system{
 			proxy.current_motion_transform = to_transform(motion);
 			proxy.previous_shape_transform = shape_transform(*proxy.collider, static_cast<math::trans2>(proxy.previous_motion_transform));
 			proxy.current_shape_transform = shape_transform(*proxy.collider, static_cast<math::trans2>(proxy.current_motion_transform));
+			proxy.current_shape_query = proxy.collider->shape.query(proxy.current_shape_transform);
 			proxy.aabb = proxy.collider->shape.aabb(proxy.current_shape_transform);
 		}
 
@@ -300,27 +311,30 @@ namespace mo_yanxi::game::ecs::system{
 					pair.toi = toi.fraction;
 					if(pair.hit){
 						const auto contact = this->stabilize_contact_normal(lhs, rhs, toi.contact);
+						const auto lhs_toi_query = lhs.collider->shape.query(
+							math::lerp(lhs.previous_shape_transform, lhs.current_shape_transform, pair.toi));
+						const auto rhs_toi_query = rhs.collider->shape.query(
+							math::lerp(rhs.previous_shape_transform, rhs.current_shape_transform, pair.toi));
 						pair.manifold = physics::build_contact_manifold(
-							lhs.collider->shape,
-							math::lerp(lhs.previous_shape_transform, lhs.current_shape_transform, pair.toi),
-							rhs.collider->shape,
-							math::lerp(rhs.previous_shape_transform, rhs.current_shape_transform, pair.toi),
+							lhs_toi_query,
+							{},
+							rhs_toi_query,
+							{},
 							contact);
 						pair.hit = pair.manifold.hit;
 					}
 					return;
 				}
 
-				const auto contact = this->stabilize_contact_normal(lhs, rhs, physics::collide(
-					lhs.collider->shape,
-					lhs.current_shape_transform,
-					rhs.collider->shape,
-					rhs.current_shape_transform));
+				const auto contact = this->stabilize_contact_normal(
+					lhs,
+					rhs,
+					physics::collide(lhs.current_shape_query, rhs.current_shape_query));
 				pair.manifold = physics::build_contact_manifold(
-					lhs.collider->shape,
-					lhs.current_shape_transform,
-					rhs.collider->shape,
-					rhs.current_shape_transform,
+					lhs.current_shape_query,
+					{},
+					rhs.current_shape_query,
+					{},
 					contact);
 				pair.hit = pair.manifold.hit;
 			};
@@ -761,6 +775,12 @@ namespace mo_yanxi::game::ecs::system{
 			run_narrowphase();
 			solve_and_emit_contacts(dt);
 			rebuild_spatial_cache();
+			last_statistics_ = {
+				.proxy_count = proxies_.size(),
+				.candidate_pair_count = candidate_pairs_.size(),
+				.contact_constraint_count = contact_constraints_.size(),
+				.contact_event_count = contact_events_.size()
+			};
 			proxies_.clear();
 			candidate_pairs_.clear();
 			contact_constraints_.clear();
@@ -772,6 +792,10 @@ namespace mo_yanxi::game::ecs::system{
 
 		[[nodiscard]] std::span<const physics_contact_event> contact_events() const noexcept{
 			return contact_events_;
+		}
+
+		[[nodiscard]] physics_system_statistics last_statistics() const noexcept{
+			return last_statistics_;
 		}
 
 		template <typename Fn>

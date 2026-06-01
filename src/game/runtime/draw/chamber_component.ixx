@@ -1,6 +1,6 @@
-export module mo_yanxi.game.runtime.draw.collision_shape_component;
+export module mo_yanxi.game.runtime.draw.chamber_component;
 
-export import mo_yanxi.game.ecs.component.manage;
+export import mo_yanxi.game.ecs.component.chamber.damage_grid;
 export import mo_yanxi.game.ecs.component.physics;
 export import mo_yanxi.game.runtime.draw.collision_shape;
 export import mo_yanxi.game.runtime.game_renderer;
@@ -8,10 +8,8 @@ export import mo_yanxi.game.runtime.draw.collision_shape_style;
 
 namespace mo_yanxi::game::ecs{
 export
-struct collision_shape_drawer{
-	draw::collision_shape_draw_style style{};
-	float screen_clip_margin{8.f};
-	game_render_shape_surface surface{game_render_shape_surface::fill_outline};
+struct chamber_drawer{
+	float screen_clip_margin{24.f};
 	bool enabled{true};
 
 	[[nodiscard]] game::game_draw_cull_bounds cull_bounds(

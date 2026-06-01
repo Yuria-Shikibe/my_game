@@ -1,5 +1,4 @@
-#include <cstdlib>
-#include <cstdio>
+#include <gtest/gtest.h>
 
 import std;
 import mo_yanxi.game.ecs.object_storage;
@@ -130,6 +129,21 @@ namespace{
 			&& value != nullptr
 			&& common->handle == object
 			&& value->value == 42;
+	}
+
+	[[nodiscard]] bool test_register_channel_accepts_lvalue_system(){
+		object_collection<test_context, building_common> collection{};
+		sensor_system system{};
+		auto& sensors = collection.register_channel<sensor_building>(system);
+		const object_handle sensor = collection.emplace<sensor_building>(building_common{}, 0);
+
+		test_context context{};
+		collection.update_all(context);
+
+		const auto* sensor_state = collection.try_get<sensor_building>(sensor);
+		return sensors.object_type() == mo_yanxi::unstable_type_identity_of<sensor_building>()
+			&& sensor_state != nullptr
+			&& sensor_state->updates == 1;
 	}
 
 	[[nodiscard]] bool test_type_safe_channels(){
@@ -362,38 +376,38 @@ namespace{
 	}
 }
 
-int main(){
-	if(!test_default_common_collection()){
-		std::println(stderr, "test_default_common_collection failed");
-		return EXIT_FAILURE;
-	}
-	if(!test_type_safe_channels()){
-		std::println(stderr, "test_type_safe_channels failed");
-		return EXIT_FAILURE;
-	}
-	if(!test_swap_erase_keeps_moved_handle_valid()){
-		std::println(stderr, "test_swap_erase_keeps_moved_handle_valid failed");
-		return EXIT_FAILURE;
-	}
-	if(!test_direct_events()){
-		std::println(stderr, "test_direct_events failed");
-		return EXIT_FAILURE;
-	}
-	if(!test_event_delivery_success()){
-		std::println(stderr, "test_event_delivery_success failed");
-		return EXIT_FAILURE;
-	}
-	if(!test_inline_immovable_event_payload()){
-		std::println(stderr, "test_inline_immovable_event_payload failed");
-		return EXIT_FAILURE;
-	}
-	if(!test_missing_channel_is_explicit_error()){
-		std::println(stderr, "test_missing_channel_is_explicit_error failed");
-		return EXIT_FAILURE;
-	}
-	if(!test_duplicate_channel_is_explicit_error()){
-		std::println(stderr, "test_duplicate_channel_is_explicit_error failed");
-		return EXIT_FAILURE;
-	}
-	return EXIT_SUCCESS;
+TEST(ObjectStorageTest, DefaultCommonCollection){
+	EXPECT_TRUE(test_default_common_collection());
+}
+
+TEST(ObjectStorageTest, RegisterChannelAcceptsLvalueSystem){
+	EXPECT_TRUE(test_register_channel_accepts_lvalue_system());
+}
+
+TEST(ObjectStorageTest, TypeSafeChannels){
+	EXPECT_TRUE(test_type_safe_channels());
+}
+
+TEST(ObjectStorageTest, SwapEraseKeepsMovedHandleValid){
+	EXPECT_TRUE(test_swap_erase_keeps_moved_handle_valid());
+}
+
+TEST(ObjectStorageTest, DirectEvents){
+	EXPECT_TRUE(test_direct_events());
+}
+
+TEST(ObjectStorageTest, EventDeliverySuccess){
+	EXPECT_TRUE(test_event_delivery_success());
+}
+
+TEST(ObjectStorageTest, InlineImmovableEventPayload){
+	EXPECT_TRUE(test_inline_immovable_event_payload());
+}
+
+TEST(ObjectStorageTest, MissingChannelIsExplicitError){
+	EXPECT_TRUE(test_missing_channel_is_explicit_error());
+}
+
+TEST(ObjectStorageTest, DuplicateChannelIsExplicitError){
+	EXPECT_TRUE(test_duplicate_channel_is_explicit_error());
 }

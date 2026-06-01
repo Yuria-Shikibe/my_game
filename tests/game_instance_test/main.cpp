@@ -1,346 +1,447 @@
-#include <cstdlib>
-#include <cstdio>
+#include <gtest/gtest.h>
 
 import std;
 import mo_yanxi.game.instance;
 import mo_yanxi.game.physics;
-import mo_yanxi.game.runtime.game_render_device;
-import mo_yanxi.game.runtime.game_post_process;
+import mo_yanxi.graphic.draw.instruction;
+import mo_yanxi.gui.renderer.frontend;
 
 namespace{
 	using namespace mo_yanxi::game;
 	using namespace mo_yanxi::game::ecs;
 	namespace math = mo_yanxi::math;
+	namespace gui = mo_yanxi::gui;
+	namespace instr = mo_yanxi::graphic::draw::instruction;
 
-	using physics_desc = std::tuple<chunk_meta, mech_motion, collider, physics_body>;
+	using drawable_body_desc = std::tuple<
+		chunk_meta,
+		mech_motion,
+		collider,
+		physics_body,
+		collision_shape_drawer>;
+	using invalid_drawable_desc = std::tuple<chunk_meta, collision_shape_drawer>;
 
-	entity_id spawn_physics_entity(
+	struct counting_draw_frontend_host{
+		mo_yanxi::graphic::draw::data_layout_table<> vertex_table{};
+		mo_yanxi::graphic::draw::data_layout_table<> general_table{};
+		game_render_frame_state frame{};
+		std::size_t line_count{};
+		std::size_t closed_polyline_count{};
+		std::size_t filled_triangle_count{};
+		std::size_t filled_quad_count{};
+		std::size_t ring_count{};
+		std::size_t rectangle_count{};
+		std::size_t non_clip_depth_count{};
+		float max_depth{};
+
+		void push(const instr::instruction_head head, const std::byte* payload){
+			auto track_depth = [](counting_draw_frontend_host& self, const std::byte* payload){
+				if(payload == nullptr){
+					return;
+				}
+				const auto& generic = *std::launder(reinterpret_cast<const instr::primitive_generic*>(payload));
+				self.max_depth = std::max(self.max_depth, generic.depth);
+				if(generic.depth < 0.f || generic.depth > 1.f){
+					++self.non_clip_depth_count;
+				}
+			};
+
+			switch(head.type){
+			case instr::instr_type::line:
+				track_depth(*this, payload);
+				++line_count;
+				break;
+			case instr::instr_type::line_segments_closed:
+				track_depth(*this, payload);
+				++closed_polyline_count;
+				break;
+			case instr::instr_type::triangle:
+				track_depth(*this, payload);
+				++filled_triangle_count;
+				break;
+			case instr::instr_type::quad:
+				track_depth(*this, payload);
+				++filled_quad_count;
+				break;
+			case instr::instr_type::poly:
+			case instr::instr_type::poly_partial:
+				track_depth(*this, payload);
+				++ring_count;
+				break;
+			case instr::instr_type::rectangle:
+				track_depth(*this, payload);
+				++rectangle_count;
+				break;
+			default:
+				break;
+			}
+		}
+
+		void push_batch(const std::span<const instr::instruction_head> heads, const std::byte* payload){
+			for(const instr::instruction_head head : heads){
+				this->push(head, payload);
+			}
+		}
+
+		void push_state(
+			mo_yanxi::graphic::draw::instruction::state_push_config,
+			mo_yanxi::graphic::draw::instruction::state_tag,
+			std::span<const std::byte>,
+			unsigned){
+		}
+
+		[[nodiscard]] gui::renderer_frontend create_frontend(){
+			return gui::renderer_frontend{
+				vertex_table,
+				general_table,
+				{
+					*this,
+					[](counting_draw_frontend_host& host, instr::instruction_head head, const std::byte* payload) static{
+						host.push(head, payload);
+					},
+					[](counting_draw_frontend_host& host, std::span<const instr::instruction_head> heads, const std::byte* payload) static{
+						host.push_batch(heads, payload);
+					},
+					[](counting_draw_frontend_host& host, auto config, auto tag, auto payload, auto offset) static{
+						host.push_state(config, tag, payload, offset);
+					}
+				}
+			};
+		}
+
+		[[nodiscard]] std::size_t primitive_count() const noexcept{
+			return line_count
+				+ closed_polyline_count
+				+ filled_triangle_count
+				+ filled_quad_count
+				+ ring_count
+				+ rectangle_count;
+		}
+	};
+
+	[[nodiscard]] bool near(const float lhs, const float rhs, const float margin = 0.05f) noexcept{
+		return std::abs(lhs - rhs) <= margin;
+	}
+
+	[[nodiscard]] constexpr math::vec2 chamber_tile_point(const float x, const float y) noexcept{
+		return {
+			chamber::tiles_to_world_units(x),
+			chamber::tiles_to_world_units(y)
+		};
+	}
+
+	[[nodiscard]] constexpr math::vec2 chamber_tile_half_extent(const float x, const float y) noexcept{
+		return {
+			chamber::tiles_to_world_units(x),
+			chamber::tiles_to_world_units(y)
+		};
+	}
+
+	[[nodiscard]] entity_id spawn_drawable_box(
 		component_manager& manager,
 		const math::vec2 position,
-		const physics::collision_shape& shape,
-		physics_body body,
-		const math::vec2 velocity = {}){
-		tuple_to_comp_t<physics_desc> components{};
+		const math::vec2 half_extent){
+		tuple_to_comp_t<drawable_body_desc> components{};
 		components.template get<mech_motion>().trans.vec = position;
-		components.template get<mech_motion>().vel.vec = velocity;
-		components.template get<collider>().shape = shape.to_record();
-		components.template get<physics_body>() = body;
-		return manager.spawn<physics_desc>(std::move(components));
+		components.template get<collider>().shape = physics::make_box_collision_shape(half_extent).to_record();
+		components.template get<physics_body>() = physics_body::make_static();
+		return manager.spawn<drawable_body_desc>(std::move(components));
 	}
 }
 
-int main(){
-	using namespace mo_yanxi::game;
-	using namespace mo_yanxi::game::ecs;
+TEST(GameInstanceTest, DefaultSceneDrawsThroughDrawableComponents){
+	game_instance instance{};
+	instance.initialize();
 
-	{
-		game_instance demo_instance{};
-		demo_instance.initialize();
-		const auto snapshot = demo_instance.latest_render_snapshot();
-		if(snapshot.collision_shapes.size() < 4){
-			std::println(stderr, "default render scene did not publish enough debug shapes");
-			return EXIT_FAILURE;
-		}
-		if(!snapshot.effects.bloom_enabled || !snapshot.effects.transparent_overlap_enabled){
-			std::println(stderr, "default render effects were not enabled");
-			return EXIT_FAILURE;
-		}
-		const auto submission = mo_yanxi::game::make_game_render_submission(snapshot, math::vec2{1280.f, 720.f});
-		if(!submission.valid_extent() || submission.collision_shapes.size() != snapshot.collision_shapes.size()){
-			std::println(stderr, "default render submission did not preserve visible debug shapes");
-			return EXIT_FAILURE;
-		}
-		if(submission.effects.oit_layout.width != 1280u || submission.effects.oit_layout.height != 720u){
-			std::println(stderr, "render submission did not update OIT layout for the target extent");
-			return EXIT_FAILURE;
-		}
-		const auto frame = mo_yanxi::game::make_game_render_frame(submission);
-		if(!frame.valid_extent()
-			|| frame.frame_index() != submission.frame_index
-			|| frame.submission.collision_shapes.size() != submission.collision_shapes.size()){
-			std::println(stderr, "game render frame did not preserve submission state");
-			return EXIT_FAILURE;
-		}
-		const auto debug_draw_packet = mo_yanxi::game::make_game_debug_draw_packet(submission);
-		if(debug_draw_packet.empty()
-			|| debug_draw_packet.rings.empty()
-			|| debug_draw_packet.lines.empty()
-			|| debug_draw_packet.closed_polylines.empty()
-			|| debug_draw_packet.vertices.empty()){
-			std::println(stderr, "default render scene did not build a complete game debug draw packet");
-			return EXIT_FAILURE;
-		}
-		const auto device_debug_draw_packet =
-			mo_yanxi::game::game_2d_render_device::make_frame_debug_draw_packet(submission);
-		if(device_debug_draw_packet.lines.size() != debug_draw_packet.lines.size()
-			|| device_debug_draw_packet.rings.size() != debug_draw_packet.rings.size()
-			|| device_debug_draw_packet.closed_polylines.size() != debug_draw_packet.closed_polylines.size()
-			|| device_debug_draw_packet.vertices.size() != debug_draw_packet.vertices.size()){
-			std::println(stderr, "game render device did not build the same debug draw packet");
-			return EXIT_FAILURE;
-		}
-		const auto device_frame = mo_yanxi::game::game_2d_render_device::make_frame(submission);
-		if(device_frame.debug_draw.lines.size() != frame.debug_draw.lines.size()
-			|| device_frame.debug_draw.rings.size() != frame.debug_draw.rings.size()
-			|| device_frame.debug_draw.closed_polylines.size() != frame.debug_draw.closed_polylines.size()
-			|| device_frame.debug_draw.vertices.size() != frame.debug_draw.vertices.size()){
-			std::println(stderr, "game render device frame did not reuse shared CPU frame data");
-			return EXIT_FAILURE;
-		}
-		const auto debug_gpu_packet = mo_yanxi::game::make_game_debug_draw_gpu_packet(frame.debug_draw);
-		if(debug_gpu_packet.empty()
-			|| debug_gpu_packet.params.line_count != frame.debug_draw.lines.size()
-			|| debug_gpu_packet.params.ring_count != frame.debug_draw.rings.size()
-			|| debug_gpu_packet.params.closed_polyline_count != frame.debug_draw.closed_polylines.size()
-			|| debug_gpu_packet.params.vertex_count != frame.debug_draw.vertices.size()){
-			std::println(stderr, "game debug draw GPU packet did not preserve CPU packet counts");
-			return EXIT_FAILURE;
-		}
-		if(debug_gpu_packet.lines.front().color[3] <= 0.f
-			|| debug_gpu_packet.rings.front().segments < 6u
-			|| debug_gpu_packet.closed_polylines.front().vertex_count < 3u){
-			std::println(stderr, "game debug draw GPU packet carried invalid draw instance data");
-			return EXIT_FAILURE;
-		}
-		const auto device_debug_gpu_packet =
-			mo_yanxi::game::game_2d_render_device::make_frame_debug_draw_gpu_packet(frame);
-		if(device_debug_gpu_packet.params != debug_gpu_packet.params){
-			std::println(stderr, "game render device did not build matching debug draw GPU packet params");
-			return EXIT_FAILURE;
-		}
-		const auto emit_packet = mo_yanxi::game::make_game_oit_emit_packet_gpu(submission);
-		if(emit_packet.params.shape_count <= 0 || emit_packet.shape_storage.shapes[0].enabled == 0){
-			std::println(stderr, "default render scene did not feed OIT emit params");
-			return EXIT_FAILURE;
-		}
-		if(mo_yanxi::game::get_game_oit_emit_shape_storage_buffer_size() != sizeof(game_oit_emit_shape_storage_gpu)){
-			std::println(stderr, "OIT shape storage buffer size is incorrect");
-			return EXIT_FAILURE;
-		}
-		if(mo_yanxi::game::get_game_oit_tile_mask_storage_buffer_size()
-			!= sizeof(game_oit_tile_mask_gpu) * game_oit_emit_params_gpu::max_tile_count){
-			std::println(stderr, "OIT tile mask storage buffer size is incorrect");
-			return EXIT_FAILURE;
-		}
-		if(emit_packet.params.tile_grid_width != 80
-			|| emit_packet.params.tile_grid_height != 45
-			|| emit_packet.params.use_tile_mask == 0){
-			std::println(stderr, "OIT emit params did not publish tile bin metadata");
-			return EXIT_FAILURE;
-		}
-		if(std::ranges::none_of(
-			emit_packet.tile_masks,
-			[](const game_oit_tile_mask_gpu& tile){
-				return std::ranges::any_of(tile.shape_words, [](const std::uint32_t word){
-					return word != 0u;
-				});
-			})){
-			std::println(stderr, "OIT tile bins did not reference any emitted shapes");
-			return EXIT_FAILURE;
-		}
-		const auto shape_kinds = emit_packet.shape_storage.shapes
-			| std::views::take(static_cast<std::size_t>(emit_packet.params.shape_count))
-			| std::views::transform(&game_oit_emit_shape_gpu::shape_kind);
-		if(!std::ranges::contains(shape_kinds, 0)
-			|| !std::ranges::contains(shape_kinds, 1)
-			|| !std::ranges::contains(shape_kinds, 2)
-			|| !std::ranges::contains(shape_kinds, 3)){
-			std::println(stderr, "default render scene did not feed circle/capsule/box/polygon OIT params");
-			return EXIT_FAILURE;
-		}
-		if(std::ranges::none_of(
-			emit_packet.shape_storage.shapes | std::views::take(static_cast<std::size_t>(emit_packet.params.shape_count)),
-			[](const game_oit_emit_shape_gpu& shape){
-				return shape.shape_kind == 3 && shape.polygon_vertex_count >= 3;
-			})){
-			std::println(stderr, "default render polygon did not feed OIT polygon vertices");
-			return EXIT_FAILURE;
-		}
-		if(std::ranges::any_of(
-			emit_packet.shape_storage.shapes | std::views::take(static_cast<std::size_t>(emit_packet.params.shape_count)),
-			[](const game_oit_emit_shape_gpu& shape){
-				return shape.half_extent.x <= 0.f || shape.half_extent.y <= 0.f;
-			})){
-			std::println(stderr, "OIT emit shape did not publish conservative bounds");
-			return EXIT_FAILURE;
-		}
-		if(!std::ranges::is_sorted(
-			emit_packet.shape_storage.shapes | std::views::take(static_cast<std::size_t>(emit_packet.params.shape_count)),
-			{},
-			&game_oit_emit_shape_gpu::depth)){
-			std::println(stderr, "OIT emit shapes were not sorted by GPU depth");
-			return EXIT_FAILURE;
-		}
-		if(mo_yanxi::game::make_game_emit_depth(std::numeric_limits<float>::quiet_NaN(), 0) != 0.5f){
-			std::println(stderr, "OIT emit depth did not sanitize invalid style depth");
-			return EXIT_FAILURE;
-		}
-		auto many_shape_snapshot = snapshot;
-		while(many_shape_snapshot.collision_shapes.size() < game_oit_emit_params_gpu::max_shapes + 8u){
-			many_shape_snapshot.collision_shapes.push_back(
-				snapshot.collision_shapes[many_shape_snapshot.collision_shapes.size() % snapshot.collision_shapes.size()]);
-		}
-		const auto many_submission = mo_yanxi::game::make_game_render_submission(
-			many_shape_snapshot,
-			math::vec2{1280.f, 720.f});
-		const auto many_emit_packet = mo_yanxi::game::make_game_oit_emit_packet_gpu(many_submission);
-		if(many_emit_packet.params.shape_count != static_cast<std::int32_t>(game_oit_emit_params_gpu::max_shapes)){
-			std::println(stderr, "OIT emit params did not keep the expanded shape packet capacity");
-			return EXIT_FAILURE;
-		}
-		if(many_emit_packet.params.shape_count <= static_cast<std::int32_t>(game_oit_buffer_layout::default_nodes_per_pixel)){
-			std::println(stderr, "OIT emit params are still capped by per-pixel node capacity");
-			return EXIT_FAILURE;
-		}
-		const auto packet = mo_yanxi::game::game_2d_render_device::make_frame_packet(submission);
-		if(packet.oit_emit.params.shape_count != emit_packet.params.shape_count || packet.ssao.sample_count != 40){
-			std::println(stderr, "game render GPU packet did not carry OIT/SSAO params");
-			return EXIT_FAILURE;
-		}
-		if(packet.oit_emit.params.bloom_enabled != 1
-			|| packet.oit_emit.params.transparent_overlap_enabled != 1
-			|| packet.ssao.enabled != 0){
-			std::println(stderr, "game render GPU packet did not reflect default effect toggles");
-			return EXIT_FAILURE;
-		}
-		auto disabled_effect_snapshot = snapshot;
-		disabled_effect_snapshot.effects.bloom_enabled = false;
-		disabled_effect_snapshot.effects.transparent_overlap_enabled = false;
-		disabled_effect_snapshot.effects.ssao_enabled = true;
-		const auto disabled_effect_packet = mo_yanxi::game::game_2d_render_device::make_frame_packet(
-			disabled_effect_snapshot,
-			math::vec2{1280.f, 720.f});
-		if(disabled_effect_packet.oit_emit.params.bloom_enabled != 0
-			|| disabled_effect_packet.oit_emit.params.bloom_hint_strength != 0.f
-			|| disabled_effect_packet.oit_emit.params.transparent_overlap_enabled != 0
-			|| disabled_effect_packet.ssao.enabled != 1){
-			std::println(stderr, "game render GPU packet did not propagate effect toggle overrides");
-			return EXIT_FAILURE;
-		}
-		const auto packet_from_snapshot = mo_yanxi::game::game_2d_render_device::make_frame_packet(
-			snapshot,
-			math::vec2{1280.f, 720.f});
-		if(packet_from_snapshot.frame_index != snapshot.frame_index
-			|| packet_from_snapshot.oit_emit.params.shape_count != packet.oit_emit.params.shape_count){
-			std::println(stderr, "game render device frame packet entry is inconsistent");
-			return EXIT_FAILURE;
-		}
-		const auto high_res_emit_packet = mo_yanxi::game::make_game_oit_emit_packet_gpu(
-			mo_yanxi::game::make_game_render_submission(snapshot, math::vec2{3840.f, 2160.f}));
-		if(high_res_emit_packet.params.tile_grid_width != 240
-			|| high_res_emit_packet.params.tile_grid_height != 135
-			|| high_res_emit_packet.params.use_tile_mask == 0
-			|| high_res_emit_packet.tile_masks.size() != 240u * 135u){
-			std::println(stderr, "OIT tile bins did not stay active at 4K extent");
-			return EXIT_FAILURE;
-		}
-		const auto oversized_emit_packet = mo_yanxi::game::make_game_oit_emit_packet_gpu(
-			mo_yanxi::game::make_game_render_submission(snapshot, math::vec2{8192.f, 8192.f}));
-		if(oversized_emit_packet.params.use_tile_mask != 0 || !oversized_emit_packet.tile_masks.empty()){
-			std::println(stderr, "OIT tile bins did not fall back when the tile grid exceeded capacity");
-			return EXIT_FAILURE;
-		}
-		auto empty_snapshot = snapshot;
-		empty_snapshot.collision_shapes.clear();
-		const auto empty_emit_packet = mo_yanxi::game::make_game_oit_emit_packet_gpu(
-			mo_yanxi::game::make_game_render_submission(empty_snapshot, math::vec2{1280.f, 720.f}));
-		if(empty_emit_packet.params.shape_count != 0
-			|| empty_emit_packet.params.use_tile_mask != 0
-			|| !empty_emit_packet.tile_masks.empty()){
-			std::println(stderr, "empty OIT packet still allocated tile bins");
-			return EXIT_FAILURE;
-		}
-		const auto invalid_submission = mo_yanxi::game::make_game_render_submission(snapshot, math::vec2{0.f, 720.f});
-		if(invalid_submission.valid_extent()
-			|| mo_yanxi::game::make_game_oit_emit_packet_gpu(invalid_submission).params.shape_count != 0){
-			std::println(stderr, "invalid render extent still produced drawable OIT params");
-			return EXIT_FAILURE;
-		}
-		demo_instance.shutdown();
-	}
+	counting_draw_frontend_host renderer{};
+	gui::renderer_frontend frontend = renderer.create_frontend();
+	const auto stats = instance.render_frame(frontend, math::vec2{1280.f, 720.f});
 
-	{
-		const auto layout = mo_yanxi::game::make_game_oit_buffer_layout({1280.f, 720.f});
-		if(layout.node_capacity() != 1280u * 720u * game_oit_buffer_layout::default_nodes_per_pixel){
-			std::println(stderr, "OIT buffer layout capacity is incorrect");
-			return EXIT_FAILURE;
-		}
-		if(layout.node_storage_bytes() != layout.node_capacity() * sizeof(game_oit_node_gpu)){
-			std::println(stderr, "OIT node storage size is incorrect");
-			return EXIT_FAILURE;
-		}
-		if(layout.storage_buffer_bytes() != layout.node_storage_bytes() + sizeof(game_oit_statistics_gpu)){
-			std::println(stderr, "OIT storage buffer size is incorrect");
-			return EXIT_FAILURE;
-		}
-		if(mo_yanxi::game::get_game_oit_node_storage_buffer_size({1280u, 720u}) != layout.node_storage_bytes()){
-			std::println(stderr, "OIT compositor node buffer size is incorrect");
-			return EXIT_FAILURE;
-		}
-		if(mo_yanxi::game::get_game_oit_node_storage_offset() != sizeof(game_oit_statistics_gpu)){
-			std::println(stderr, "OIT node storage offset is incorrect");
-			return EXIT_FAILURE;
-		}
+	EXPECT_TRUE(stats.valid_extent());
+	EXPECT_EQ(stats.frame.frame_index, 1u);
+	EXPECT_EQ(stats.frame.simulation_tick, 0u);
+	EXPECT_DOUBLE_EQ(stats.frame.simulation_time_seconds, 0.0);
+	EXPECT_GE(stats.drawable_visited, 6u);
+	EXPECT_EQ(stats.drawable_visited, stats.drawable_drawn + stats.drawable_culled);
+	EXPECT_GT(stats.drawable_drawn, 0u);
+	EXPECT_GT(renderer.primitive_count(), 0u);
+	EXPECT_GT(renderer.ring_count, 0u);
+	EXPECT_GT(renderer.closed_polyline_count, 0u);
+	EXPECT_GT(renderer.filled_quad_count + renderer.filled_triangle_count + renderer.rectangle_count, 0u);
+	EXPECT_GE(renderer.line_count, 82u);
+	EXPECT_EQ(renderer.non_clip_depth_count, 0u);
+	EXPECT_LT(renderer.max_depth, 1.f);
+}
 
-		const auto ssao_kernel = mo_yanxi::game::make_game_ssao_kernel({1280.f, 720.f});
-		if(ssao_kernel.sample_count != 40u){
-			std::println(stderr, "SSAO kernel sample count is incorrect");
-			return EXIT_FAILURE;
-		}
-	}
+TEST(GameInstanceTest, ChamberDrawerOwnsChamberRendering){
+	game_instance instance{};
+	entity_id chamber_entity{};
+	game_command_result spawn_result{};
+	instance.post_command(spawn_chamber_command{
+		.extent = {4, 2},
+		.initial_commands = {
+			chamber::place_basic_building_command{
+				.region = {.src = {1, 0}, .extent = {2, 1}},
+				.hit_points = 40.f,
+				.structural = true
+			}
+		},
+		.out_entity = &chamber_entity,
+		.out_result = &spawn_result
+	});
+	instance.update(1.f / 60.f);
 
+	ASSERT_TRUE(spawn_result.applied());
+	ASSERT_TRUE(chamber_entity.is_inserted());
+	EXPECT_NE(chamber_entity.try_get<chamber::chamber_manifold>(), nullptr);
+	EXPECT_NE(chamber_entity.try_get<chamber_drawer>(), nullptr);
+
+	counting_draw_frontend_host renderer{};
+	gui::renderer_frontend frontend = renderer.create_frontend();
+	const auto stats = instance.render_frame(frontend, math::vec2{1280.f, 720.f});
+	EXPECT_GE(stats.drawable_visited, 1u);
+	EXPECT_GE(stats.drawable_drawn, 1u);
+	EXPECT_GE(renderer.filled_quad_count, 2u);
+	EXPECT_GE(renderer.closed_polyline_count, 2u);
+	EXPECT_EQ(renderer.non_clip_depth_count, 0u);
+	EXPECT_LT(renderer.max_depth, 1.f);
+}
+
+TEST(GameInstanceTest, DrawableCullingReportsDrawnAndCulledCounts){
+	game_instance instance{};
+	instance.reset();
+	auto& manager = instance.components();
+	const entity_id visible = spawn_drawable_box(manager, {0.f, 0.f}, {8.f, 8.f});
+	const entity_id hidden = spawn_drawable_box(manager, {5000.f, 0.f}, {8.f, 8.f});
+	manager.commit();
+	ASSERT_TRUE(visible.is_inserted());
+	ASSERT_TRUE(hidden.is_inserted());
+
+	counting_draw_frontend_host renderer{};
+	gui::renderer_frontend frontend = renderer.create_frontend();
+	const auto stats = instance.render_frame(frontend, math::vec2{1280.f, 720.f});
+	EXPECT_EQ(stats.drawable_visited, 2u);
+	EXPECT_EQ(stats.drawable_drawn, 1u);
+	EXPECT_EQ(stats.drawable_culled, 1u);
+	EXPECT_GT(renderer.primitive_count(), 0u);
+}
+
+TEST(GameInstanceTest, DrawableMissingRequiredComponentsFails){
+	game_instance instance{};
+	instance.reset();
+	auto& manager = instance.components();
+	tuple_to_comp_t<invalid_drawable_desc> components{};
+	(void)manager.spawn<invalid_drawable_desc>(std::move(components));
+	manager.commit();
+
+	counting_draw_frontend_host renderer{};
+	gui::renderer_frontend frontend = renderer.create_frontend();
+	EXPECT_THROW((void)instance.render_frame(frontend, math::vec2{1280.f, 720.f}), std::logic_error);
+}
+
+TEST(GameInstanceTest, SpawnCommandsCreateWorldComponents){
 	game_instance instance{};
 	entity_id dynamic_entity{};
 	entity_id static_entity{};
+	entity_id projectile_entity{};
+	game_command_result dynamic_spawn_result{};
+	game_command_result static_spawn_result{};
+	game_command_result projectile_spawn_result{};
 
-	instance.post_command([&](game_world& world){
-		auto& manager = world.components();
-		const auto shape = physics::make_box_collision_shape({0.5f, 0.5f});
-		dynamic_entity = spawn_physics_entity(
-			manager,
-			{-0.25f, 0.f},
-			shape,
-			physics_body::make_dynamic(1.f),
-			{1.f, 0.f});
-		static_entity = spawn_physics_entity(
-			manager,
-			{0.25f, 0.f},
-			shape,
-			physics_body::make_static());
+	const auto shape = physics::make_box_collision_shape({0.5f, 0.5f});
+	projectile_state projectile{};
+	projectile.faction_id = 7;
+	projectile.remaining_lifetime = 5.f;
+	projectile.set_damage({.material_damage = {.direct = 12.f}});
+	instance.post_command(spawn_physics_body_command{
+		.position = {-0.25f, 0.f},
+		.shape = shape.to_record(),
+		.body = physics_body::make_dynamic(1.f),
+		.velocity = {1.f, 0.f},
+		.out_entity = &dynamic_entity,
+		.out_result = &dynamic_spawn_result
+	});
+	instance.post_command(spawn_physics_body_command{
+		.position = {0.25f, 0.f},
+		.shape = shape.to_record(),
+		.body = physics_body::make_static(),
+		.out_entity = &static_entity,
+		.out_result = &static_spawn_result
+	});
+	instance.post_command(spawn_projectile_command{
+		.position = {10.f, 0.f},
+		.shape = physics::make_circle_collision_shape(0.25f).to_record(),
+		.body = physics_body::make_dynamic(1.f),
+		.velocity = {20.f, 0.f},
+		.ccd = physics::ccd_mode::linear_sweep,
+		.projectile = std::move(projectile),
+		.out_entity = &projectile_entity,
+		.out_result = &projectile_spawn_result
 	});
 
 	instance.update(1.f / 30.f);
 
-	if(dynamic_entity == nullptr || static_entity == nullptr){
-		std::println(stderr, "spawn command did not run");
-		return EXIT_FAILURE;
-	}
-	if(!dynamic_entity.is_inserted() || !static_entity.is_inserted()){
-		std::println(stderr, "spawned entities were not committed");
-		return EXIT_FAILURE;
-	}
+	EXPECT_TRUE(dynamic_spawn_result.applied());
+	EXPECT_TRUE(static_spawn_result.applied());
+	EXPECT_TRUE(projectile_spawn_result.applied());
+	EXPECT_TRUE(dynamic_entity.is_inserted());
+	EXPECT_TRUE(static_entity.is_inserted());
+	EXPECT_TRUE(projectile_entity.is_inserted());
+	EXPECT_EQ(dynamic_spawn_result.target, dynamic_entity);
+	EXPECT_EQ(static_spawn_result.target, static_entity);
+	EXPECT_EQ(projectile_spawn_result.target, projectile_entity);
+
+	const auto* spawned_projectile = projectile_entity.try_get<projectile_state>();
+	const auto* projectile_motion = projectile_entity.try_get<mech_motion>();
+	const auto* projectile_collider = projectile_entity.try_get<collider>();
+	ASSERT_NE(spawned_projectile, nullptr);
+	ASSERT_NE(projectile_motion, nullptr);
+	ASSERT_NE(projectile_collider, nullptr);
+	EXPECT_EQ(spawned_projectile->faction_id, 7u);
+	EXPECT_TRUE(near(spawned_projectile->damage.material_damage.direct, 12.f));
+	EXPECT_TRUE(near(projectile_motion->vel.vec.x, 20.f));
+	EXPECT_EQ(projectile_collider->ccd, physics::ccd_mode::linear_sweep);
 
 	const auto events = instance.world().physics().contact_events();
-	if(std::ranges::none_of(events, [&](const physics_contact_event& event){
+	EXPECT_TRUE(std::ranges::any_of(events, [&](const physics_contact_event& event){
 		return event.key == physics_contact_key::ordered(dynamic_entity, static_entity);
-	})){
-		std::println(stderr, "physics contact event was not emitted");
-		return EXIT_FAILURE;
-	}
+	}));
 
 	instance.reset();
 	std::size_t visited{};
 	instance.components().each([&](const mech_motion&){
 		++visited;
 	});
-	if(visited != 0){
-		std::println(stderr, "reset did not clear the world");
-		return EXIT_FAILURE;
-	}
-	if(!instance.world().physics().contact_events().empty()){
-		std::println(stderr, "reset did not clear physics contacts");
-		return EXIT_FAILURE;
-	}
+	EXPECT_EQ(visited, 0u);
+	EXPECT_TRUE(instance.world().physics().contact_events().empty());
+}
 
-	return EXIT_SUCCESS;
+TEST(GameInstanceTest, ChamberTargetingAndProjectileCommands){
+	game_instance instance{};
+	entity_id chamber_entity{};
+	entity_id target_entity{};
+	game_command_result chamber_spawn_result{};
+	game_command_result target_spawn_result{};
+	const math::trans2 chamber_transform{chamber_tile_point(10.f, 20.f), math::pi_half};
+
+	instance.post_command(spawn_chamber_command{
+		.extent = {4, 1},
+		.position = chamber_transform.vec,
+		.rotation = static_cast<float>(chamber_transform.rot),
+		.faction_id = 7u,
+		.initial_commands = {
+			chamber::place_standard_building_command{
+				.type = chamber::standard_building_type::structural_joint,
+				.region = {.src = {0, 0}, .extent = {1, 1}},
+				.hit_points = 100.f,
+				.structural_support_radius = 3
+			},
+			chamber::place_standard_building_command{
+				.type = chamber::standard_building_type::radar,
+				.region = {.src = {1, 0}, .extent = {1, 1}},
+				.hit_points = 50.f,
+				.radar = {.sensor = {.range = chamber::tiles_to_world_units(5.f)}}
+			},
+			chamber::place_standard_building_command{
+				.type = chamber::standard_building_type::turret,
+				.region = {.src = {2, 0}, .extent = {1, 1}},
+				.hit_points = 50.f,
+				.turret = {.projectile_speed = 20.f}
+			}
+		},
+		.out_entity = &chamber_entity,
+		.out_result = &chamber_spawn_result
+	});
+	instance.post_command(spawn_physics_body_command{
+		.position = game_world::chamber_to_world_point(chamber_tile_point(3.8f, 0.5f), chamber_transform),
+		.shape = physics::make_box_collision_shape(chamber_tile_half_extent(0.5f, 0.5f)).to_record(),
+		.body = physics_body::make_static(),
+		.out_entity = &target_entity,
+		.out_result = &target_spawn_result
+	});
+	instance.update(1.f / 60.f);
+	ASSERT_TRUE(chamber_spawn_result.applied());
+	ASSERT_TRUE(target_spawn_result.applied());
+	EXPECT_NE(chamber_entity.try_get<chamber_drawer>(), nullptr);
+
+	const auto* chamber_component = chamber_entity.try_get<chamber::chamber_manifold>();
+	ASSERT_NE(chamber_component, nullptr);
+	ASSERT_EQ(chamber_component->last_fire_requests().size(), 1u);
+	EXPECT_EQ(chamber_component->last_fire_requests().front().target.entity, target_entity);
+
+	std::vector<entity_id> projectile_entities{};
+	game_command_result projectile_spawn_result{};
+	instance.post_command(spawn_chamber_projectiles_command{
+		.target = chamber_entity,
+		.shape = physics::make_circle_collision_shape(chamber::tiles_to_world_units(0.25f)).to_record(),
+		.body = physics_body::make_dynamic(1.f),
+		.lifetime = 5.f,
+		.ccd = physics::ccd_mode::linear_sweep,
+		.out_entities = &projectile_entities,
+		.out_result = &projectile_spawn_result
+	});
+	instance.update(1.f / 60.f);
+	ASSERT_TRUE(projectile_spawn_result.applied());
+	ASSERT_EQ(projectile_entities.size(), 1u);
+	EXPECT_EQ(chamber_component->last_fire_requests().size(), 1u);
+
+	const entity_id projectile_entity = projectile_entities.front();
+	const auto* spawned_projectile = projectile_entity.try_get<projectile_state>();
+	const auto* spawned_motion = projectile_entity.try_get<mech_motion>();
+	ASSERT_NE(spawned_projectile, nullptr);
+	ASSERT_NE(spawned_motion, nullptr);
+	EXPECT_EQ(spawned_projectile->owner_id(), chamber_entity);
+	EXPECT_EQ(spawned_projectile->faction_id, 7u);
+	EXPECT_TRUE(near(spawned_projectile->damage.material_damage.direct, 10.f));
+	EXPECT_TRUE(near(spawned_motion->vel.vec.x, 0.f));
+	EXPECT_TRUE(near(spawned_motion->vel.vec.y, 20.f));
+}
+
+TEST(GameInstanceTest, ProjectileDamagesChamberThroughPhysicsContact){
+	game_world world{};
+	entity_id chamber_entity{};
+	entity_id projectile_entity{};
+	const auto chamber_result = world.execute(spawn_chamber_command{
+		.extent = {4, 1},
+		.faction_id = 3u,
+		.initial_commands = {
+			chamber::place_basic_building_command{
+				.region = {.src = {1, 0}, .extent = {2, 1}},
+				.hit_points = 40.f,
+				.structural = true
+			}
+		},
+		.out_entity = &chamber_entity
+	});
+	projectile_state projectile{};
+	projectile.faction_id = 9u;
+	projectile.remaining_lifetime = 5.f;
+	projectile.set_damage({.material_damage = {.direct = 30.f}});
+	const auto projectile_result = world.execute(spawn_projectile_command{
+		.position = chamber_tile_point(-1.f, 0.5f),
+		.shape = physics::make_circle_collision_shape(chamber::tiles_to_world_units(0.25f)).to_record(),
+		.body = physics_body::make_kinematic(),
+		.velocity = {chamber::tiles_to_world_units(6.f), 0.f},
+		.sensor = true,
+		.ccd = physics::ccd_mode::linear_sweep,
+		.projectile = std::move(projectile),
+		.out_entity = &projectile_entity
+	});
+	world.components().commit();
+	world.step(1.f);
+
+	const auto* chamber_component = chamber_entity.try_get<chamber::chamber_manifold>();
+	const auto* damaged_building = chamber_component != nullptr
+		? chamber_component->building_at({1, 0})
+		: nullptr;
+	ASSERT_TRUE(chamber_result.applied());
+	ASSERT_TRUE(projectile_result.applied());
+	ASSERT_NE(chamber_component, nullptr);
+	ASSERT_NE(damaged_building, nullptr);
+	EXPECT_TRUE(near(damaged_building->hit_points.current, 10.f, 0.001f));
+	EXPECT_TRUE(projectile_entity.is_expired());
+	EXPECT_TRUE(std::ranges::any_of(world.physics().contact_events(), [&](const physics_contact_event& event){
+		return event.phase == physics_contact_phase::begin
+			&& event.key == physics_contact_key::ordered(chamber_entity, projectile_entity);
+	}));
 }

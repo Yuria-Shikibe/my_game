@@ -11,13 +11,14 @@ export import mo_yanxi.graphic.compositor.resource;
 import mo_yanxi.backend.vulkan.attachment_manager;
 import mo_yanxi.backend.vulkan.pipeline_manager;
 import mo_yanxi.backend.vulkan.renderer.components;
-import mo_yanxi.game.physics.shape;
+import mo_yanxi.game.profile.runtime;
 import mo_yanxi.graphic.draw.instruction;
 import mo_yanxi.graphic.draw.instruction.batch.backend.vulkan;
 import mo_yanxi.graphic_state_context;
 import mo_yanxi.gui.examples.default_config.constants;
 import mo_yanxi.gui.fx.config;
 import mo_yanxi.gui.renderer.abi;
+import mo_yanxi.gui.renderer.frontend;
 import mo_yanxi.log;
 import mo_yanxi.math.matrix3;
 import mo_yanxi.math.rect_ortho;
@@ -57,38 +58,6 @@ constexpr T game_renderer_bit_mask(const unsigned count) noexcept{
 			game::game_renderer_bit_mask<std::uint32_t>(
 				game::get_game_render_target(config, current_pipe_option).popcount())
 		};
-}
-
-[[nodiscard]] instr::primitive_generic make_game_collision_generic(
-	const draw::collision_shape_draw_style& style) noexcept{
-	return {
-		.depth = style.depth
-	};
-}
-
-[[nodiscard]] math::section<graphic::float4> make_game_collision_color(
-	const draw::collision_shape_draw_style& style) noexcept{
-	return {style.color, style.color};
-}
-
-[[nodiscard]] float sane_game_collision_stroke(const draw::collision_shape_draw_style& style) noexcept{
-	return std::max(style.stroke, 1.0e-5f);
-}
-
-[[nodiscard]] math::range game_collision_stroke_radius_range(
-	const float radius,
-	const draw::collision_shape_draw_style& style) noexcept{
-	const float half_stroke = game::sane_game_collision_stroke(style) * 0.5f;
-	return {
-		std::max(0.f, radius - half_stroke),
-		std::max(0.f, radius + half_stroke)
-	};
-}
-
-[[nodiscard]] std::uint32_t game_collision_circle_segment_count(const float radius) noexcept{
-	return std::max<std::uint32_t>(
-		12u,
-		graphic::draw::instruction::get_circle_vertices(std::max(radius, 1.f)));
 }
 
 export
@@ -205,7 +174,7 @@ private:
 	struct game_2d_render_worker{
 	private:
 		game_2d_renderer* renderer_{};
-		std::move_only_function<game_render_snapshot()> snapshot_provider_{};
+		std::move_only_function<game_render_frame_stats(game_2d_renderer&, math::vec2)> frame_builder_{};
 		std::jthread worker_thread_{};
 		std::mutex state_mutex_{};
 		std::mutex renderer_mutex_{};
@@ -249,9 +218,8 @@ private:
 				}
 
 				try{
-					const auto snapshot = std::invoke(snapshot_provider_);
 					std::lock_guard renderer_lock{renderer_mutex_};
-					renderer_->prepare_frame(snapshot, current_extent);
+					(void)std::invoke(frame_builder_, *renderer_, current_extent);
 				} catch(...){
 					log::error({"GameRenderer"}, "worker failed while preparing request {}", current_request);
 					this->set_worker_exception(std::current_exception(), current_request);
@@ -267,9 +235,9 @@ private:
 
 		[[nodiscard]] game_2d_render_worker(
 			game_2d_renderer& renderer,
-			std::move_only_function<game_render_snapshot()> snapshot_provider)
+			std::move_only_function<game_render_frame_stats(game_2d_renderer&, math::vec2)> frame_builder)
 			: renderer_{&renderer},
-			  snapshot_provider_{std::move(snapshot_provider)}{
+			  frame_builder_{std::move(frame_builder)}{
 		}
 
 		game_2d_render_worker(const game_2d_render_worker&) = delete;
@@ -363,8 +331,10 @@ private:
 	vk::command_buffer attachment_clear_and_init_command_buffer_{};
 	command_recording_context record_ctx_{};
 	VkSampler sampler_{};
-	game_render_submission current_submission_{};
+	game_render_frame_state current_frame_state_{};
+	game_render_frame_stats last_frame_stats_{};
 	std::unique_ptr<game_2d_render_worker> worker_{};
+	std::shared_ptr<profile::profile_session> profile_session_{};
 
 	[[nodiscard]] static game_renderer_tables make_tables(){
 		return {};
@@ -526,207 +496,18 @@ private:
 		batch_host_.push_instr(head, reinterpret_cast<const std::byte*>(std::addressof(data)));
 	}
 
-	void push_line(
-		math::vec2 src,
-		math::vec2 dst,
-		const draw::collision_shape_draw_style& style){
-		if((dst - src).length2() <= 1.0e-10f){
-			return;
-		}
-
-		this->push_instruction(instr::line{
-			.generic = game::make_game_collision_generic(style),
-			.src = src,
-			.dst = dst,
-			.color = game::make_game_collision_color(style),
-			.stroke = game::sane_game_collision_stroke(style)
-		});
-	}
-
-	void push_closed_line(
-		const std::span<const math::vec2> vertices,
-		const draw::collision_shape_draw_style& style){
-		if(vertices.size() < 3){
-			return;
-		}
-
-		std::vector<instr::line_node> nodes{};
-		nodes.reserve(vertices.size());
-		for(const auto vertex : vertices){
-			nodes.push_back(instr::line_node{
-				.pos = vertex,
-				.stroke = game::sane_game_collision_stroke(style),
-				.color = game::make_game_collision_color(style)
-			});
-		}
-
-		this->push_instruction(
-			instr::line_segments_closed{instr::line_segments{
-				.generic = game::make_game_collision_generic(style)
-			}},
-			std::span<const instr::line_node>{nodes});
-	}
-
-	void draw_shape(
-		const physics::circle_shape& shape,
-		const math::trans2 transform,
-		const draw::collision_shape_draw_style& style){
-		if(shape.radius <= 0.f){
-			return;
-		}
-
-		this->push_instruction(instr::poly{
-			.generic = game::make_game_collision_generic(style),
-			.pos = transform.vec,
-			.segments = game::game_collision_circle_segment_count(shape.radius),
-			.initial_angle = static_cast<float>(transform.rot),
-			.radius = game::game_collision_stroke_radius_range(shape.radius, style),
-			.color = game::make_game_collision_color(style)
-		});
-	}
-
-	void draw_shape(
-		const physics::capsule_shape& shape,
-		const math::trans2 transform,
-		const draw::collision_shape_draw_style& style){
-		if(shape.radius <= 0.f){
-			return;
-		}
-
-		const math::vec2 begin = shape.begin >> transform;
-		const math::vec2 end = shape.end >> transform;
-		const math::vec2 axis = end - begin;
-		const float axis_length2 = axis.length2();
-		if(axis_length2 <= 1.0e-10f){
-			this->draw_shape(physics::circle_shape{shape.radius}, math::trans2{begin, transform.rot}, style);
-			return;
-		}
-
-		const math::vec2 direction = axis / std::sqrt(axis_length2);
-		const math::vec2 normal{-direction.y, direction.x};
-		const math::vec2 offset = normal * shape.radius;
-
-		this->push_line(begin + offset, end + offset, style);
-		this->push_line(begin - offset, end - offset, style);
-
-		const float axis_angle = direction.angle_rad();
-		const float normal_angle = axis_angle + math::pi_half;
-		const float inverse_two_pi = 1.f / math::pi_2;
-		const auto radius = game::game_collision_stroke_radius_range(shape.radius, style);
-		const auto color = game::make_game_collision_color(style);
-		const auto generic = game::make_game_collision_generic(style);
-		const auto segments = std::max<std::uint32_t>(
-			6u,
-			game::game_collision_circle_segment_count(shape.radius) / 2u);
-
-		this->push_instruction(instr::poly_partial{
-			.generic = generic,
-			.pos = end,
-			.segments = segments,
-			.range = {normal_angle * inverse_two_pi, -0.5f},
-			.radius = radius,
-			.color = {color.from, color.from, color.to, color.to}
-		});
-
-		this->push_instruction(instr::poly_partial{
-			.generic = generic,
-			.pos = begin,
-			.segments = segments,
-			.range = {(normal_angle - math::pi) * inverse_two_pi, -0.5f},
-			.radius = radius,
-			.color = {color.from, color.from, color.to, color.to}
-		});
-	}
-
-	void draw_shape(
-		const physics::box_shape& shape,
-		const math::trans2 transform,
-		const draw::collision_shape_draw_style& style){
-		if(shape.half_extent.x <= 0.f || shape.half_extent.y <= 0.f){
-			return;
-		}
-
-		const auto half = shape.half_extent;
-		const std::array vertices{
-			math::vec2{-half.x, -half.y} >> transform,
-			math::vec2{half.x, -half.y} >> transform,
-			math::vec2{half.x, half.y} >> transform,
-			math::vec2{-half.x, half.y} >> transform
-		};
-		this->push_closed_line(vertices, style);
-	}
-
-	void draw_shape(
-		const physics::convex_polygon_shape& shape,
-		const math::trans2 transform,
-		const draw::collision_shape_draw_style& style){
-		if(!shape.valid()){
-			return;
-		}
-
-		std::vector<math::vec2> vertices{};
-		vertices.reserve(shape.vertices.size());
-		for(const auto vertex : shape.vertices){
-			vertices.push_back(vertex >> transform);
-		}
-		this->push_closed_line(vertices, style);
-	}
-
-	void draw_shape_part(
-		const physics::collision_shape_record_part& part,
-		const std::span<const math::vec2> polygon_vertices,
-		const math::trans2 transform,
-		const draw::collision_shape_draw_style& style){
-		const math::trans2 part_transform = part.local_transform >> transform;
-		switch(part.type){
-		case physics::shape_type::circle:
-			this->draw_shape(part.payload.circle, part_transform, style);
-			return;
-		case physics::shape_type::capsule:
-			this->draw_shape(part.payload.capsule, part_transform, style);
-			return;
-		case physics::shape_type::box:
-			this->draw_shape(part.payload.box, part_transform, style);
-			return;
-		case physics::shape_type::convex_polygon:{
-			const auto payload = part.payload.convex_polygon;
-			const auto offset = static_cast<std::size_t>(payload.vertex_offset);
-			const auto count = static_cast<std::size_t>(payload.vertex_count);
-			if(count < 3 || offset > polygon_vertices.size() || count > polygon_vertices.size() - offset){
-				return;
-			}
-
-			std::vector<math::vec2> vertices{};
-			vertices.reserve(count);
-			for(const auto vertex : polygon_vertices.subspan(offset, count)){
-				vertices.push_back(vertex >> part_transform);
-			}
-			this->push_closed_line(vertices, style);
-			return;
-		}
-		}
-		std::unreachable();
-	}
-
-	void draw_shape(
-		const physics::collision_shape_record& shape,
-		const math::trans2 transform,
-		const draw::collision_shape_draw_style& style){
-		for(const auto& part : shape.records()){
-			this->draw_shape_part(part, shape.polygon_vertices(), transform, style);
-		}
-	}
-
-	void build_draw_list(const game_render_submission& submission){
-		const math::vec2 extent = submission.extent;
+public:
+	void begin_frame(const game_render_frame_state& state){
+		current_frame_state_ = state;
+		const math::vec2 extent = state.extent;
 		batch_host_.begin_rendering();
 		batch_host_.get_data_group_non_vertex_info().push_default(gui::fx::ui_state(
 			extent,
-			static_cast<float>(submission.frame_index) / 60.f));
+			static_cast<float>(state.simulation_time_seconds)));
 		batch_host_.get_data_group_non_vertex_info().push_default(gui::fx::slide_line_config{});
 
 		const auto screen_to_uniform = math::mat3{}.set_orthogonal({}, extent);
-		const auto element_to_screen = submission.camera.get_v2v_mat({});
+		const auto element_to_screen = state.camera.get_v2v_mat({});
 		this->push_vertex_data(0, gui::ubo_screen_info{screen_to_uniform});
 		this->push_vertex_data(2, gui::accumulated_state{
 			.overlay_color = graphic::color{},
@@ -756,11 +537,9 @@ private:
 		this->update_state(gui::fx::push_constant{gui::example::gpip::default_draw_constants{}});
 		this->update_state(gui::fx::blend::pma::standard);
 		this->update_state(gui::fx::make_blend_write_mask(true), 0);
+	}
 
-		for(const auto& item : submission.collision_shapes){
-			this->draw_shape(item.shape, item.transform, item.style);
-		}
-
+	void end_frame(const game_render_frame_state&){
 		this->update_state(gui::fx::blit_config{
 			.blit_region = gui::fx::blit_config::full_screen_region,
 			.pipe_info = {.pipeline_index = 0}
@@ -768,6 +547,7 @@ private:
 		batch_host_.end_rendering();
 	}
 
+private:
 	void upload(){
 		frames_.advance();
 		auto& frame = frames_.current_frame();
@@ -902,20 +682,43 @@ public:
 		const VkCommandPool command_pool,
 		const VkSampler sampler,
 		const std::filesystem::path& shader_spv_path,
-		std::move_only_function<game_render_snapshot()> snapshot_provider)
+		std::move_only_function<game_render_frame_stats(game_2d_renderer&, math::vec2)> frame_builder)
 		: game_2d_renderer{allocator, device, command_pool, sampler, shader_spv_path}{
-		this->set_snapshot_provider(std::move(snapshot_provider));
+		this->set_frame_builder(std::move(frame_builder));
 	}
 
-	void set_snapshot_provider(std::move_only_function<game_render_snapshot()> snapshot_provider){
+	[[nodiscard]] gui::renderer_frontend create_frontend() noexcept{
+		return gui::renderer_frontend{
+			tables_.vertex,
+			tables_.non_vertex,
+			{
+				*this,
+				[](game_2d_renderer& renderer, instr::instruction_head head, const std::byte* payload) static{
+					renderer.batch_host_.push_instr(head, payload);
+				},
+				[](game_2d_renderer& renderer, std::span<const instr::instruction_head> heads, const std::byte* payload) static{
+					renderer.batch_host_.push_instr_batch(heads, payload);
+				},
+				[](game_2d_renderer& renderer, auto config, auto tag, auto payload, auto offset) static{
+					renderer.batch_host_.push_state(config, tag, payload, offset);
+				}
+			}
+		};
+	}
+
+	void set_frame_builder(std::move_only_function<game_render_frame_stats(game_2d_renderer&, math::vec2)> frame_builder){
 		this->stop();
-		log::info({"GameRenderer"}, "set snapshot provider");
-		worker_ = std::make_unique<game_2d_render_worker>(*this, std::move(snapshot_provider));
+		log::info({"GameRenderer"}, "set frame builder");
+		worker_ = std::make_unique<game_2d_render_worker>(*this, std::move(frame_builder));
+	}
+
+	void set_profile_session(std::shared_ptr<profile::profile_session> session){
+		profile_session_ = std::move(session);
 	}
 
 	void start(){
 		if(worker_ == nullptr){
-			throw std::logic_error{"game renderer snapshot provider is not set"};
+			throw std::logic_error{"game renderer frame builder is not set"};
 		}
 		worker_->start();
 	}
@@ -940,39 +743,42 @@ public:
 	template <typename F>
 	decltype(auto) with_render_lock(F&& fn){
 		if(worker_ == nullptr){
-			throw std::logic_error{"game renderer snapshot provider is not set"};
+			throw std::logic_error{"game renderer frame builder is not set"};
 		}
 		return worker_->with_render_lock(std::forward<F>(fn));
 	}
 
-	void prepare_frame(const game_render_snapshot& snapshot, const math::vec2 extent){
-		current_submission_ = game::make_game_render_submission(snapshot, extent);
-		if(!current_submission_.valid_extent()){
-			return;
+	void commit_prepared_frame(){
+		auto* profile_session = profile_session_.get();
+		{
+			profile::profile_scope_timer timer{profile_session, current_frame_state_.frame_index, "renderer.upload"};
+			this->upload();
 		}
-
-		this->build_draw_list(current_submission_);
-		this->upload();
-		this->create_command();
+		{
+			profile::profile_scope_timer timer{profile_session, current_frame_state_.frame_index, "renderer.create_command"};
+			this->create_command();
+		}
 		log::trace(
 			{"GameRenderer"},
-			"prepared frame={} extent=({}, {}) shapes={}",
-			current_submission_.frame_index,
-			current_submission_.extent.x,
-			current_submission_.extent.y,
-			current_submission_.collision_shapes.size());
+			"prepared frame={} extent=({}, {}) visited={} drawn={} culled={}",
+			current_frame_state_.frame_index,
+			current_frame_state_.extent.x,
+			current_frame_state_.extent.y,
+			last_frame_stats_.drawable_visited,
+			last_frame_stats_.drawable_drawn,
+			last_frame_stats_.drawable_culled);
 	}
 
 	[[nodiscard]] std::uint64_t request_full_frame(const math::vec2 extent){
 		if(worker_ == nullptr){
-			throw std::logic_error{"game renderer snapshot provider is not set"};
+			throw std::logic_error{"game renderer frame builder is not set"};
 		}
 		return worker_->request_full_frame(extent);
 	}
 
 	void wait_frame(const std::uint64_t request_index){
 		if(worker_ == nullptr){
-			throw std::logic_error{"game renderer snapshot provider is not set"};
+			throw std::logic_error{"game renderer frame builder is not set"};
 		}
 		worker_->wait_frame(request_index);
 	}
@@ -1015,8 +821,17 @@ public:
 		};
 	}
 
-	[[nodiscard]] const game_render_submission& current_submission() const noexcept{
-		return current_submission_;
+	void set_last_frame_stats(const game_render_frame_stats& stats) noexcept{
+		last_frame_stats_ = stats;
+		current_frame_state_ = stats.frame;
+	}
+
+	[[nodiscard]] const game_render_frame_state& current_frame_state() const noexcept{
+		return current_frame_state_;
+	}
+
+	[[nodiscard]] const game_render_frame_stats& last_frame_stats() const noexcept{
+		return last_frame_stats_;
 	}
 };
 

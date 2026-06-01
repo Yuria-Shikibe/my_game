@@ -1,3 +1,5 @@
+#include <gtest/gtest.h>
+
 import std;
 import mo_yanxi.soa_vector;
 
@@ -50,6 +52,9 @@ namespace{
 				--*alive;
 			}
 		}
+	};
+
+	struct tag{
 	};
 
 	consteval bool basic_storage_test(){
@@ -142,6 +147,40 @@ namespace{
 	static_assert(lifetime_test());
 }
 
-int main(){
-	return 0;
+TEST(SoaVectorTest, MoveOnlyElements){
+	mo_yanxi::soa_vector<byte_allocator, int, std::unique_ptr<int>> move_only{};
+	move_only.emplace_back(1, std::make_unique<int>(7));
+	move_only.emplace_back(2, std::make_unique<int>(11));
+	ASSERT_EQ(move_only.size(), 2u);
+	EXPECT_EQ(move_only.get<int>(0), 1);
+	EXPECT_EQ(*move_only.get<std::unique_ptr<int>>(0), 7);
+	EXPECT_EQ(move_only.get<int>(1), 2);
+	EXPECT_EQ(*move_only.get<std::unique_ptr<int>>(1), 11);
+}
+
+TEST(SoaVectorTest, EmptyColumnsUseZeroStorage){
+	static_assert(mo_yanxi::soa_zero_storage_column_v<tag>);
+
+	mo_yanxi::soa_vector<byte_allocator, int, tag> vec{};
+	vec.reserve(4);
+	EXPECT_EQ(vec.capacity(), 4u);
+
+	auto [value, marker] = vec.emplace_back(11, tag{});
+	value += 5;
+
+	tag* const tag_object = std::addressof(marker);
+	EXPECT_EQ(vec.size(), 1u);
+	EXPECT_EQ(vec.get<int>(0), 16);
+	EXPECT_EQ(std::addressof(vec.get<tag>(0)), tag_object);
+
+	vec.reserve(16);
+	EXPECT_EQ(vec.capacity(), 16u);
+	EXPECT_EQ(vec.get<int>(0), 16);
+	EXPECT_EQ(std::addressof(vec.get<tag>(0)), tag_object);
+
+	vec.emplace_back(23, tag{});
+	vec.erase_unstable(0);
+	EXPECT_EQ(vec.size(), 1u);
+	EXPECT_EQ(vec.get<int>(0), 23);
+	EXPECT_EQ(std::addressof(vec.get<tag>(0)), tag_object);
 }

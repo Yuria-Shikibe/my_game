@@ -1,4 +1,4 @@
-#include <cstdlib>
+#include <gtest/gtest.h>
 
 import std;
 import mo_yanxi.game.physics;
@@ -42,6 +42,10 @@ namespace{
 
 	[[nodiscard]] bool near(const float lhs, const float rhs, const float margin = 0.01f) noexcept{
 		return std::abs(lhs - rhs) <= margin;
+	}
+
+	[[nodiscard]] bool near_vec(const math::vec2 lhs, const math::vec2 rhs, const float margin = 0.01f) noexcept{
+		return near(lhs.x, rhs.x, margin) && near(lhs.y, rhs.y, margin);
 	}
 
 	[[nodiscard]] constexpr math::frect make_rect(
@@ -355,6 +359,59 @@ namespace{
 			&& near(piped_bound.vert_11().y, piped_record_bound.vert_11().y);
 	}
 
+	[[nodiscard]] bool test_shape_record_cached_query_support(){
+		collision_shape shape{};
+		shape |= make_circle_collision_shape(0.75f, {.vec = {-0.5f, 0.25f}, .rot = 0.3f});
+		shape |= make_capsule_collision_shape(
+			{-0.8f, -0.1f},
+			{0.9f, 0.25f},
+			0.2f,
+			{.vec = {0.7f, -0.3f}, .rot = -0.45f});
+		shape |= make_box_collision_shape({0.6f, 1.1f}, {.vec = {1.4f, 0.6f}, .rot = 0.65f});
+
+		const std::array triangle{
+			math::vec2{-0.3f, -0.4f},
+			math::vec2{0.8f, -0.2f},
+			math::vec2{0.1f, 0.9f}
+		};
+		shape |= make_convex_polygon_collision_shape(triangle, {.vec = {-1.1f, 0.45f}, .rot = 0.2f});
+
+		const auto record = shape.to_record();
+		const std::array transforms{
+			math::trans2{.vec = {0.f, 0.f}, .rot = 0.f},
+			math::trans2{.vec = {2.f, -1.f}, .rot = 0.37f},
+			math::trans2{.vec = {-1.5f, 2.25f}, .rot = -0.8f}
+		};
+		const std::array directions{
+			math::vec2{1.f, 0.f},
+			math::vec2{-0.35f, 0.9f},
+			math::vec2{0.2f, -1.f},
+			math::vec2{1.f, 1.f}
+		};
+
+		for(const auto transform : transforms){
+			const auto query = record.query(transform);
+			for(const auto direction : directions){
+				const auto expected = shape.support(direction, transform);
+				if(!near_vec(record.support(direction, transform), expected)
+					|| !near_vec(query.support(direction), expected)){
+					return false;
+				}
+			}
+		}
+
+		const math::trans2 base{.vec = {0.5f, -0.75f}, .rot = 0.4f};
+		const math::trans2 parent{.vec = {-2.f, 1.25f}, .rot = -0.35f};
+		const auto composed = base >> parent;
+		const auto query = record.query(base);
+		for(const auto direction : directions){
+			if(!near_vec(query.support(direction, parent), record.support(direction, composed))){
+				return false;
+			}
+		}
+		return true;
+	}
+
 	[[nodiscard]] bool test_shape_record_storage_and_payload_visit(){
 		collision_shape empty{};
 		const auto empty_record = empty.to_record();
@@ -467,7 +524,27 @@ namespace{
 		const auto box_a = make_box_collision_shape({1.f, 1.f});
 		const auto box_b = make_box_collision_shape({1.f, 1.f});
 		const auto box_hit = collide(box_a, {}, box_b, {.vec = {1.25f, 0.f}, .rot = 0.f});
-		return box_hit.hit && box_hit.depth > 0.7f && box_hit.normal.x > 0.9f;
+		if(!box_hit.hit || box_hit.depth <= 0.7f || box_hit.normal.x <= 0.9f){
+			return false;
+		}
+
+		const auto capsule = make_capsule_collision_shape(
+			{-0.5f, 0.f},
+			{0.7f, 0.1f},
+			0.25f,
+			{.vec = {0.2f, -0.1f}, .rot = 0.3f});
+		const auto box_record = box_a.to_record();
+		const auto capsule_record = capsule.to_record();
+		const math::trans2 box_transform{.vec = {-0.1f, 0.2f}, .rot = 0.25f};
+		const math::trans2 capsule_transform{.vec = {0.95f, 0.15f}, .rot = -0.2f};
+		const auto shape_contact = collide(box_a, box_transform, capsule, capsule_transform);
+		const auto record_contact = collide(box_record, box_transform, capsule_record, capsule_transform);
+		const auto query_contact = collide(box_record.query(box_transform), capsule_record.query(capsule_transform));
+		return shape_contact.hit
+			&& record_contact.hit
+			&& query_contact.hit
+			&& near(record_contact.depth, shape_contact.depth, 0.05f)
+			&& near(query_contact.depth, record_contact.depth, 0.05f);
 	}
 
 	[[nodiscard]] bool test_contact_manifold(){
@@ -487,6 +564,22 @@ namespace{
 			return false;
 		}
 
+		const auto box_record = box.to_record();
+		const auto query_contact = collide(
+			box_record.query({}),
+			box_record.query({.vec = {1.25f, 0.f}, .rot = 0.f}));
+		const auto query_manifold = build_contact_manifold(
+			box_record.query({}),
+			{},
+			box_record.query({.vec = {1.25f, 0.f}, .rot = 0.f}),
+			{},
+			query_contact);
+		if(!query_manifold.hit
+			|| query_manifold.point_count != 2
+			|| query_manifold.normal.x < 0.9f){
+			return false;
+		}
+
 		const auto circle = make_circle_collision_shape(1.f);
 		const auto circle_hit = collide(circle, {}, circle, {.vec = {1.5f, 0.f}, .rot = 0.f});
 		const auto circle_manifold = collide_manifold(circle, {}, circle, {.vec = {1.5f, 0.f}, .rot = 0.f});
@@ -502,8 +595,10 @@ namespace{
 	}
 
 	[[nodiscard]] bool test_linear_toi(){
-		const auto mover = make_circle_collision_shape(0.5f).to_record();
-		const auto wall = make_box_collision_shape({1.f, 1.f}).to_record();
+		const auto mover_shape = make_circle_collision_shape(0.5f);
+		const auto wall_shape = make_box_collision_shape({1.f, 1.f});
+		const auto mover = mover_shape.to_record();
+		const auto wall = wall_shape.to_record();
 		const auto hit = linear_time_of_impact(
 			mover,
 			{.vec = {-5.f, 0.f}, .rot = 0.f},
@@ -513,7 +608,21 @@ namespace{
 			{},
 			32,
 			10);
-		if(!hit.hit || hit.fraction < 0.3f || hit.fraction > 0.4f || !hit.contact.hit){
+		const auto shape_hit = linear_time_of_impact(
+			mover_shape,
+			{.vec = {-5.f, 0.f}, .rot = 0.f},
+			{.vec = {5.f, 0.f}, .rot = 0.f},
+			wall_shape,
+			{},
+			{},
+			32,
+			10);
+		if(!hit.hit
+			|| !shape_hit.hit
+			|| hit.fraction < 0.3f
+			|| hit.fraction > 0.4f
+			|| !hit.contact.hit
+			|| !near(hit.fraction, shape_hit.fraction, 0.02f)){
 			return false;
 		}
 
@@ -636,16 +745,42 @@ namespace{
 	}
 }
 
-int main(){
-	if(!test_filter()) return EXIT_FAILURE;
-	if(!test_shape_support_and_decomposition()) return EXIT_FAILURE;
-	if(!test_shape_metadata_api()) return EXIT_FAILURE;
-	if(!test_shape_record_storage_and_payload_visit()) return EXIT_FAILURE;
-	if(!test_gjk_epa()) return EXIT_FAILURE;
-	if(!test_contact_manifold()) return EXIT_FAILURE;
-	if(!test_linear_toi()) return EXIT_FAILURE;
-	if(!test_bvh()) return EXIT_FAILURE;
-	if(!test_rigid_body()) return EXIT_FAILURE;
+TEST(PhysicsCoreTest, Filter){
+	EXPECT_TRUE(test_filter());
+}
 
-	return EXIT_SUCCESS;
+TEST(PhysicsCoreTest, ShapeSupportAndDecomposition){
+	EXPECT_TRUE(test_shape_support_and_decomposition());
+}
+
+TEST(PhysicsCoreTest, ShapeMetadataApi){
+	EXPECT_TRUE(test_shape_metadata_api());
+}
+
+TEST(PhysicsCoreTest, ShapeRecordCachedQuerySupport){
+	EXPECT_TRUE(test_shape_record_cached_query_support());
+}
+
+TEST(PhysicsCoreTest, ShapeRecordStorageAndPayloadVisit){
+	EXPECT_TRUE(test_shape_record_storage_and_payload_visit());
+}
+
+TEST(PhysicsCoreTest, GjkEpa){
+	EXPECT_TRUE(test_gjk_epa());
+}
+
+TEST(PhysicsCoreTest, ContactManifold){
+	EXPECT_TRUE(test_contact_manifold());
+}
+
+TEST(PhysicsCoreTest, LinearToi){
+	EXPECT_TRUE(test_linear_toi());
+}
+
+TEST(PhysicsCoreTest, Bvh){
+	EXPECT_TRUE(test_bvh());
+}
+
+TEST(PhysicsCoreTest, RigidBody){
+	EXPECT_TRUE(test_rigid_body());
 }

@@ -27,6 +27,26 @@ namespace mo_yanxi{
 
 		template <typename T, typename... Ts>
 		inline constexpr std::size_t type_index_v = type_index_impl<T, 0, Ts...>::value;
+
+		template <typename T>
+		struct zero_storage_object{
+			inline static T value{};
+		};
+	}
+
+	export
+	template <typename T>
+	inline constexpr bool soa_zero_storage_column_v =
+		std::is_empty_v<T>
+		&& std::is_trivially_default_constructible_v<T>
+		&& std::is_trivially_copyable_v<T>
+		&& std::is_trivially_destructible_v<T>;
+
+	export
+	template <typename T>
+		requires soa_zero_storage_column_v<T>
+	[[nodiscard]] T& soa_zero_storage_object() noexcept{
+		return detail::zero_storage_object<T>::value;
 	}
 
 	export
@@ -38,6 +58,8 @@ namespace mo_yanxi{
 		static_assert((std::is_object_v<Ts> && ...), "soa_vector columns must be object types");
 		static_assert((!std::is_const_v<Ts> && ...), "soa_vector columns cannot be const-qualified");
 		static_assert((!std::is_volatile_v<Ts> && ...), "soa_vector columns cannot be volatile-qualified");
+		static_assert(((!std::is_empty_v<Ts> || soa_zero_storage_column_v<Ts>) && ...),
+		              "empty soa_vector columns must be trivial zero-storage tags");
 
 		using allocator_type = Alloc;
 		using size_type = std::uint32_t;
@@ -81,22 +103,30 @@ namespace mo_yanxi{
 
 		template <typename T>
 		[[nodiscard]] constexpr T* allocate_column(size_type capacity){
-			if(capacity == 0){
+			if constexpr (soa_zero_storage_column_v<T>){
 				return nullptr;
-			}
+			}else{
+				if(capacity == 0){
+					return nullptr;
+				}
 
-			auto alloc = column_allocator<T>();
-			return rebind_traits<T>::allocate(alloc, capacity);
+				auto alloc = column_allocator<T>();
+				return rebind_traits<T>::allocate(alloc, capacity);
+			}
 		}
 
 		template <typename T>
 		constexpr void deallocate_column(T* ptr, size_type capacity) noexcept{
-			if(ptr == nullptr){
+			if constexpr (soa_zero_storage_column_v<T>){
 				return;
-			}
+			}else{
+				if(ptr == nullptr){
+					return;
+				}
 
-			auto alloc = column_allocator<T>();
-			rebind_traits<T>::deallocate(alloc, ptr, capacity);
+				auto alloc = column_allocator<T>();
+				rebind_traits<T>::deallocate(alloc, ptr, capacity);
+			}
 		}
 
 		template <std::size_t... I>
@@ -159,15 +189,23 @@ namespace mo_yanxi{
 		template <std::size_t I, typename Arg>
 		constexpr void construct_one(pointer_tuple& ptrs, size_type idx, Arg&& arg){
 			using T = element_at<I>;
-			auto alloc = column_allocator<T>();
-			rebind_traits<T>::construct(alloc, std::get<I>(ptrs) + idx, std::forward<Arg>(arg));
+			if constexpr (soa_zero_storage_column_v<T>){
+				return;
+			}else{
+				auto alloc = column_allocator<T>();
+				rebind_traits<T>::construct(alloc, std::get<I>(ptrs) + idx, std::forward<Arg>(arg));
+			}
 		}
 
 		template <std::size_t I>
 		constexpr void default_construct_one(pointer_tuple& ptrs, size_type idx){
 			using T = element_at<I>;
-			auto alloc = column_allocator<T>();
-			rebind_traits<T>::construct(alloc, std::get<I>(ptrs) + idx);
+			if constexpr (soa_zero_storage_column_v<T>){
+				return;
+			}else{
+				auto alloc = column_allocator<T>();
+				rebind_traits<T>::construct(alloc, std::get<I>(ptrs) + idx);
+			}
 		}
 
 		template <typename Tuple, std::size_t... I>
@@ -213,50 +251,60 @@ namespace mo_yanxi{
 		template <std::size_t I>
 		constexpr void move_construct_column(pointer_tuple& src, pointer_tuple& dst, size_type count, std::array<size_type, sizeof...(Ts)>& constructed){
 			using T = element_at<I>;
-			T* RESTRICT dst_ptr = std::get<I>(dst);
-			T* RESTRICT src_ptr = std::get<I>(src);
+			if constexpr (soa_zero_storage_column_v<T>){
+				constructed[I] = count;
+				return;
+			}else{
+				T* RESTRICT dst_ptr = std::get<I>(dst);
+				T* RESTRICT src_ptr = std::get<I>(src);
 
-			if constexpr (std::is_trivially_copyable_v<T>){
-				if!consteval{
-					// Reallocation moves into freshly allocated columns, so ranges are disjoint.
-					if(count != 0){
-						std::memcpy(dst_ptr, src_ptr, sizeof(T) * count);
+				if constexpr (std::is_trivially_copyable_v<T>){
+					if!consteval{
+						// Reallocation moves into freshly allocated columns, so ranges are disjoint.
+						if(count != 0){
+							std::memcpy(dst_ptr, src_ptr, sizeof(T) * count);
+						}
+						constructed[I] = count;
+						return;
 					}
-					constructed[I] = count;
-					return;
 				}
-			}
 
-			auto alloc = column_allocator<T>();
+				auto alloc = column_allocator<T>();
 
-			for(; constructed[I] != count; ++constructed[I]){
-				rebind_traits<T>::construct(
-					alloc,
-					dst_ptr + constructed[I],
-					std::move_if_noexcept(src_ptr[constructed[I]]));
+				for(; constructed[I] != count; ++constructed[I]){
+					rebind_traits<T>::construct(
+						alloc,
+						dst_ptr + constructed[I],
+						std::move_if_noexcept(src_ptr[constructed[I]]));
+				}
 			}
 		}
 
 		template <std::size_t I>
 		constexpr void copy_construct_column(const pointer_tuple& src, pointer_tuple& dst, size_type count, std::array<size_type, sizeof...(Ts)>& constructed){
 			using T = element_at<I>;
-			T* RESTRICT dst_ptr = std::get<I>(dst);
-			const T* RESTRICT src_ptr = std::get<I>(src);
+			if constexpr (soa_zero_storage_column_v<T>){
+				constructed[I] = count;
+				return;
+			}else{
+				T* RESTRICT dst_ptr = std::get<I>(dst);
+				const T* RESTRICT src_ptr = std::get<I>(src);
 
-			if constexpr (std::is_trivially_copyable_v<T>){
-				if!consteval{
-					if(count != 0){
-						std::memcpy(dst_ptr, src_ptr, sizeof(T) * count);
+				if constexpr (std::is_trivially_copyable_v<T>){
+					if!consteval{
+						if(count != 0){
+							std::memcpy(dst_ptr, src_ptr, sizeof(T) * count);
+						}
+						constructed[I] = count;
+						return;
 					}
-					constructed[I] = count;
-					return;
 				}
-			}
 
-			auto alloc = column_allocator<T>();
+				auto alloc = column_allocator<T>();
 
-			for(; constructed[I] != count; ++constructed[I]){
-				rebind_traits<T>::construct(alloc, dst_ptr + constructed[I], src_ptr[constructed[I]]);
+				for(; constructed[I] != count; ++constructed[I]){
+					rebind_traits<T>::construct(alloc, dst_ptr + constructed[I], src_ptr[constructed[I]]);
+				}
 			}
 		}
 
@@ -385,12 +433,12 @@ namespace mo_yanxi{
 
 		template <std::size_t... I>
 		[[nodiscard]] FORCE_INLINE constexpr reference row_at(size_type idx, std::index_sequence<I...>) noexcept{
-			return reference{std::get<I>(data_)[idx]...};
+			return reference{this->template get<I>(idx)...};
 		}
 
 		template <std::size_t... I>
 		[[nodiscard]] FORCE_INLINE constexpr const_reference row_at(size_type idx, std::index_sequence<I...>) const noexcept{
-			return const_reference{std::get<I>(data_)[idx]...};
+			return const_reference{this->template get<I>(idx)...};
 		}
 
 	public:
@@ -504,11 +552,13 @@ namespace mo_yanxi{
 
 		template <std::size_t I>
 		[[nodiscard]] FORCE_INLINE constexpr element_at<I>* data() noexcept{
+			static_assert(!soa_zero_storage_column_v<element_at<I>>, "zero-storage soa_vector columns have no data pointer");
 			return ptr<I>();
 		}
 
 		template <std::size_t I>
 		[[nodiscard]] FORCE_INLINE constexpr const element_at<I>* data() const noexcept{
+			static_assert(!soa_zero_storage_column_v<element_at<I>>, "zero-storage soa_vector columns have no data pointer");
 			return ptr<I>();
 		}
 
@@ -526,11 +576,13 @@ namespace mo_yanxi{
 
 		template <std::size_t I>
 		[[nodiscard]] constexpr std::span<element_at<I>> column() noexcept{
+			static_assert(!soa_zero_storage_column_v<element_at<I>>, "zero-storage soa_vector columns have no span");
 			return {data<I>(), size_};
 		}
 
 		template <std::size_t I>
 		[[nodiscard]] constexpr std::span<const element_at<I>> column() const noexcept{
+			static_assert(!soa_zero_storage_column_v<element_at<I>>, "zero-storage soa_vector columns have no span");
 			return {data<I>(), size_};
 		}
 
@@ -548,12 +600,20 @@ namespace mo_yanxi{
 
 		template <std::size_t I>
 		[[nodiscard]] FORCE_INLINE constexpr element_at<I>& get(size_type idx) noexcept{
-			return data<I>()[idx];
+			if constexpr (soa_zero_storage_column_v<element_at<I>>){
+				return soa_zero_storage_object<element_at<I>>();
+			}else{
+				return data<I>()[idx];
+			}
 		}
 
 		template <std::size_t I>
 		[[nodiscard]] FORCE_INLINE constexpr const element_at<I>& get(size_type idx) const noexcept{
-			return data<I>()[idx];
+			if constexpr (soa_zero_storage_column_v<element_at<I>>){
+				return soa_zero_storage_object<element_at<I>>();
+			}else{
+				return data<I>()[idx];
+			}
 		}
 
 		template <typename T>
@@ -717,7 +777,7 @@ namespace mo_yanxi{
 			}
 
 			auto tuple_args = std::forward_as_tuple(std::forward<Args>(args)...);
-			this->construct_row_from_tuple(data_, size_, tuple_args, std::index_sequence_for<Ts...>{});
+			this->construct_row_from_tuple(data_, size_, std::move(tuple_args), std::index_sequence_for<Ts...>{});
 			++size_;
 			return back();
 		}
@@ -763,15 +823,19 @@ namespace mo_yanxi{
 		FORCE_INLINE constexpr void move_assign_one(size_type dst, size_type src)
 			noexcept(std::is_nothrow_move_assignable_v<element_at<I>>){
 			using T = element_at<I>;
-			if constexpr (std::is_trivially_copyable_v<T>){
-				if!consteval{
-					// erase_unstable only calls this for different row indices.
-					std::memcpy(data<I>() + dst, data<I>() + src, sizeof(T));
-					return;
+			if constexpr (soa_zero_storage_column_v<T>){
+				return;
+			}else{
+				if constexpr (std::is_trivially_copyable_v<T>){
+					if!consteval{
+						// erase_unstable only calls this for different row indices.
+						std::memcpy(data<I>() + dst, data<I>() + src, sizeof(T));
+						return;
+					}
 				}
-			}
 
-			get<I>(dst) = std::move(get<I>(src));
+				get<I>(dst) = std::move(get<I>(src));
+			}
 		}
 
 		template <std::size_t... I>
@@ -787,10 +851,15 @@ namespace mo_yanxi{
 
 		template <std::size_t I>
 		constexpr void copy_assign_or_construct_one(const soa_vector& other, size_type idx){
-			if(idx < size_){
-				get<I>(idx) = other.get<I>(idx);
+			using T = element_at<I>;
+			if constexpr (soa_zero_storage_column_v<T>){
+				return;
 			}else{
-				this->template construct_one<I>(data_, idx, other.get<I>(idx));
+				if(idx < size_){
+					get<I>(idx) = other.get<I>(idx);
+				}else{
+					this->template construct_one<I>(data_, idx, other.get<I>(idx));
+				}
 			}
 		}
 
@@ -840,7 +909,12 @@ namespace mo_yanxi{
 
 		template <std::size_t I>
 		constexpr void copy_assign_one(const soa_vector& other, size_type idx){
-			get<I>(idx) = other.get<I>(idx);
+			using T = element_at<I>;
+			if constexpr (soa_zero_storage_column_v<T>){
+				return;
+			}else{
+				get<I>(idx) = other.get<I>(idx);
+			}
 		}
 
 		template <std::size_t... I>
@@ -863,7 +937,12 @@ namespace mo_yanxi{
 
 		template <std::size_t I>
 		constexpr void move_construct_one_from(soa_vector& other, size_type idx){
-			this->template construct_one<I>(data_, idx, std::move(other.get<I>(idx)));
+			using T = element_at<I>;
+			if constexpr (soa_zero_storage_column_v<T>){
+				return;
+			}else{
+				this->template construct_one<I>(data_, idx, std::move(other.get<I>(idx)));
+			}
 		}
 
 		template <std::size_t... I>

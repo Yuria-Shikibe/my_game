@@ -31,7 +31,6 @@ import mo_yanxi.algo.hash;
 import mo_yanxi.utility;
 import mo_yanxi.concepts;
 import mo_yanxi.meta_programming;
-import mo_yanxi.heterogeneous.open_addr_hash;
 
 import mo_yanxi.type_register;
 import mo_yanxi.log;
@@ -119,21 +118,26 @@ namespace mo_yanxi::game::ecs{
 		struct type_access{
 			type_identity_index type{};
 			void* (*get)(archetype*, storage_size_type) noexcept{};
-			strided_span<std::byte> (*slice)(archetype*) noexcept{};
 
 			constexpr explicit operator bool() const noexcept{
-				return get != nullptr && slice != nullptr;
+				return get != nullptr;
 			}
 		};
 
 		template <typename Requested, typename Stored>
 		static void* get_component_ptr(archetype* self, storage_size_type idx) noexcept{
-			auto& stored = self->chunks.template get<Stored>(idx);
-			return static_cast<void*>(static_cast<Requested*>(std::addressof(stored)));
+			if constexpr (::mo_yanxi::soa_zero_storage_column_v<Stored>){
+				return static_cast<void*>(std::addressof(::mo_yanxi::soa_zero_storage_object<Requested>()));
+			}else{
+				auto& stored = self->chunks.template get<Stored>(idx);
+				return static_cast<void*>(static_cast<Requested*>(std::addressof(stored)));
+			}
 		}
 
 		template <typename Requested, typename Stored>
 		static strided_span<std::byte> get_component_slice(archetype* self) noexcept{
+			static_assert(!::mo_yanxi::soa_zero_storage_column_v<Stored>,
+			              "empty ECS tag components have no materialized slice");
 			if(self->chunks.empty()){
 				return {};
 			}
@@ -165,14 +169,18 @@ namespace mo_yanxi::game::ecs{
 			void dump(const archetype& ty){
 				buffer.reserve(buffer.size() + ty.size());
 
-				for(std::size_t i = 0; i != ty.size(); ++i){
-					auto seq_chunk = ty.make_component_row(i);
-					buffer.push_back(trait::behavior::dump(seq_chunk));
+				if constexpr (trait::dump_chunk::chunk_element_count != 0){
+					for(std::size_t i = 0; i != ty.size(); ++i){
+						buffer.push_back(ty.make_dump_chunk(i));
+					}
 				}
 			}
 
 			void write(std::ostream& stream) const final{
-				std::uint32_t total_count = buffer.size();
+				if(buffer.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())){
+					throw std::length_error{"archetype serializer row count exceeds uint32_t"};
+				}
+				std::uint32_t total_count = static_cast<std::uint32_t>(buffer.size());
 				swapbyte_if_needed(total_count);
 
 				try{
@@ -249,9 +257,6 @@ namespace mo_yanxi::game::ecs{
 					unstable_type_identity_of<typename std::tuple_element_t<Idx, base_to_derive_map>::first_type>(),
 					&get_component_ptr<
 						typename std::tuple_element_t<Idx, base_to_derive_map>::first_type,
-						typename std::tuple_element_t<Idx, base_to_derive_map>::second_type>,
-					&get_component_slice<
-						typename std::tuple_element_t<Idx, base_to_derive_map>::first_type,
 						typename std::tuple_element_t<Idx, base_to_derive_map>::second_type>
 				}), ...);
 			}(std::make_index_sequence<type_hash_map_size>{});
@@ -306,10 +311,35 @@ namespace mo_yanxi::game::ecs{
 		}
 
 		template <std::size_t... I>
+		[[nodiscard]] typename trait::dump_chunk make_dump_chunk(std::size_t idx, std::index_sequence<I...>) const{
+			const auto converted_idx = static_cast<typename storage_type::size_type>(idx);
+			typename trait::dump_chunk chunk{};
+			([&]<std::size_t J>{
+				using SrcTy = std::tuple_element_t<J, raw_tuple>;
+				using DstTy = typename component_trait<SrcTy>::dump_type;
+				if constexpr (!component_trait<SrcTy>::is_transient){
+					component_custom_behavior<SrcTy>::dump(
+						get<DstTy>(chunk),
+						chunks.template get<SrcTy>(converted_idx));
+				}
+			}.template operator()<I>(), ...);
+			return chunk;
+		}
+
+		[[nodiscard]] typename trait::dump_chunk make_dump_chunk(std::size_t idx) const{
+			return make_dump_chunk(idx, std::make_index_sequence<std::tuple_size_v<raw_tuple>>{});
+		}
+
+		template <std::size_t... I>
 		void assign_component_row(std::size_t idx, components&& row, std::index_sequence<I...>){
 			const auto converted_idx = static_cast<typename storage_type::size_type>(idx);
-			((chunks.template get<std::tuple_element_t<I, raw_tuple>>(converted_idx) =
-				std::move(get<std::tuple_element_t<I, raw_tuple>>(row))), ...);
+			([&]<std::size_t J>{
+				using component_type = std::tuple_element_t<J, raw_tuple>;
+				if constexpr (!::mo_yanxi::soa_zero_storage_column_v<component_type>){
+					chunks.template get<component_type>(converted_idx) =
+						std::move(get<component_type>(row));
+				}
+			}.template operator()<I>(), ...);
 		}
 
 		void assign_component_row(std::size_t idx, components&& row){
@@ -358,7 +388,9 @@ namespace mo_yanxi::game::ecs{
 		void relocate_row_at(std::size_t idx){
 			relocate_components_at(idx);
 
-			if constexpr (requires(components& row){ trait::on_relocate(row); }){
+			if constexpr (std::copy_constructible<components>
+				&& std::assignable_from<components&, components>
+				&& requires(components& row){ trait::behavior::on_relocate(row); }){
 				auto row = make_component_row(idx);
 				trait::on_relocate(row);
 				assign_component_row(idx, std::move(row));
@@ -420,12 +452,15 @@ namespace mo_yanxi::game::ecs{
 
 			this->init_components_at(idx);
 
-			if constexpr (requires(components& row){ trait::on_init(row); }){
+			if constexpr (std::copy_constructible<components>
+				&& std::assignable_from<components&, components>
+				&& requires(components& row){ trait::behavior::on_init(row); }){
 				auto row = this->make_component_row(idx);
 				trait::on_init(row);
 					this->assign_component_row(idx, std::move(row));
 			}
-			{
+			if constexpr (std::copy_constructible<components>
+				&& std::assignable_from<components&, components>){
 				auto row = this->make_component_row(idx);
 				this->init(row);
 				this->assign_component_row(idx, std::move(row));
@@ -464,13 +499,16 @@ namespace mo_yanxi::game::ecs{
 
 			assert(this->id_at(idx) == e);
 
-			{
+			if constexpr (std::copy_constructible<components>
+				&& std::assignable_from<components&, components>){
 				auto row = make_component_row(idx);
 				this->terminate(row);
 				assign_component_row(idx, std::move(row));
 			}
 
-			if constexpr (requires(components& row){ trait::on_terminate(row); }){
+			if constexpr (std::copy_constructible<components>
+				&& std::assignable_from<components&, components>
+				&& requires(components& row){ trait::behavior::on_terminate(row); }){
 				auto row = make_component_row(idx);
 				trait::on_terminate(row);
 				assign_component_row(idx, std::move(row));
@@ -558,17 +596,20 @@ namespace mo_yanxi::game::ecs{
 		template <typename T>
 			requires (contained_in<T, appended_tuple>)
 		[[nodiscard]] std::span<T> exact_slice() noexcept{
+			static_assert(!std::is_empty_v<std::remove_cv_t<T>>, "empty ECS tag components have no materialized slice");
 			return chunks.template column<T>();
 		}
 
 		template <typename T>
 			requires (contained_in<T, appended_tuple>)
 		[[nodiscard]] std::span<const T> exact_slice() const noexcept{
+			static_assert(!std::is_empty_v<std::remove_cv_t<T>>, "empty ECS tag components have no materialized slice");
 			return chunks.template column<T>();
 		}
 
 		template <typename T>
 		[[nodiscard]] strided_span<T> slice() noexcept{
+			static_assert(!std::is_empty_v<std::remove_cv_t<T>>, "empty ECS tag components have no materialized slice");
 			constexpr auto idx = tuple_match_first_v<find_if_first_equal, base_to_derive_map, T>;
 			if constexpr (idx != std::tuple_size_v<base_to_derive_map>){
 				using stored_type = typename std::tuple_element_t<idx, base_to_derive_map>::second_type;
@@ -590,6 +631,7 @@ namespace mo_yanxi::game::ecs{
 
 		template <typename T>
 		[[nodiscard]] strided_span<const T> slice() const noexcept{
+			static_assert(!std::is_empty_v<std::remove_cv_t<T>>, "empty ECS tag components have no materialized slice");
 			constexpr auto idx = tuple_match_first_v<find_if_first_equal, base_to_derive_map, T>;
 			if constexpr (idx != std::tuple_size_v<base_to_derive_map>){
 				using stored_type = typename std::tuple_element_t<idx, base_to_derive_map>::second_type;
@@ -639,6 +681,8 @@ namespace mo_yanxi::game::ecs{
 		// using T = int;
 		template <typename T>
 		[[nodiscard]] constexpr strided_span<T> slice() const noexcept {
+			static_assert(!std::is_empty_v<std::remove_cv_t<T>>, "empty ECS tag components have no materialized slice");
+			assert(getter != nullptr);
 			auto span = getter(idt);
 			return strided_span<T>{reinterpret_cast<T*>(span.data()), span.size(), span.stride()};
 		}
@@ -713,7 +757,6 @@ namespace mo_yanxi::game::ecs{
 	struct component_manager{
 		template <typename T>
 		using small_vector_of = gch::small_vector<T>;
-		// using archetype_map_type = fixed_open_hash_map<type_identity_index, std::unique_ptr<archetype_base>>;
 		using archetype_map_type = std::unordered_map<type_identity_index, std::unique_ptr<archetype_base>>;
 
 	private:
@@ -779,8 +822,7 @@ namespace mo_yanxi::game::ecs{
 
 		//TODO make all archetype slices on the same vector, while hash map provides type to span
 		std::vector<archetype_slice> archetype_slices_{};
-		fixed_open_hash_map<type_identity_index, std::span<const archetype_slice>> type_to_archetype{};
-		// std::unordered_map<type_identity_index, std::span<const archetype_slice>> type_to_archetype{};
+		std::unordered_map<type_identity_index, std::span<const archetype_slice>> type_to_archetype{};
 		mutable std::unordered_map<
 			archetype_query_cache_key,
 			std::shared_ptr<const std::vector<archetype_query_match>>,
@@ -1338,10 +1380,200 @@ namespace mo_yanxi::game::ecs{
 			this->destroy_all();
 		}
 
+	private:
+		struct unused_component_argument{
+		};
+
+		template <typename T>
+		static constexpr bool zero_storage_query_component_v =
+			::mo_yanxi::soa_zero_storage_column_v<std::remove_cv_t<T>>;
+
+		template <typename T>
+		using materialized_query_component_tuple_t = std::conditional_t<
+			zero_storage_query_component_v<T>,
+			std::tuple<>,
+			std::tuple<T>>;
+
+		template <typename Tuple>
+		using materialized_query_tuple_t = all_apply_to<
+			tuple_cat_t,
+			unary_apply_to_tuple_t<materialized_query_component_tuple_t, Tuple>>;
+
+		template <typename T>
+		using each_argument_storage_t = std::conditional_t<
+			zero_storage_query_component_v<T>,
+			std::remove_cv_t<T>,
+			unused_component_argument>;
+
+		template <typename Tuple>
+		using each_argument_storage_tuple_t = unary_apply_to_tuple_t<each_argument_storage_t, Tuple>;
+
+		template <typename Tuple>
+		static constexpr bool tuple_has_zero_storage_component_v = []<std::size_t... Idx>(std::index_sequence<Idx...>){
+			return (zero_storage_query_component_v<std::tuple_element_t<Idx, Tuple>> || ... || false);
+		}(std::make_index_sequence<std::tuple_size_v<Tuple>>{});
+
+		template <typename Tuple>
+		static constexpr bool first_param_is_component_manager_v = []{
+			if constexpr (std::tuple_size_v<Tuple> == 0){
+				return false;
+			}else{
+				return std::same_as<std::remove_cvref_t<std::tuple_element_t<0, Tuple>>, component_manager>;
+			}
+		}();
+
+		template <tuple_spec Tuple, std::size_t... Idx>
+		[[nodiscard]] auto make_archetype_span_tuple(
+			archetype_base* identity,
+			std::index_sequence<Idx...>) const noexcept{
+			static_assert(!component_manager::tuple_has_zero_storage_component_v<Tuple>,
+			              "empty ECS tag components have no materialized slice");
+			return std::make_tuple(
+				this->require_archetype_slice(
+					unstable_type_identity_of<std::tuple_element_t<Idx, Tuple>>(),
+					identity).template slice<std::tuple_element_t<Idx, Tuple>>()...);
+		}
+
+		template <tuple_spec Tuple, typename SpanTuple, std::size_t... Idx>
+		[[nodiscard]] static auto make_span_iterators(SpanTuple& spans, std::index_sequence<Idx...>){
+			return unary_apply_to_tuple_t<strided_span_iterator, Tuple>{
+				std::ranges::begin(std::get<Idx>(spans))...};
+		}
+
+		template <typename IteratorTuple, std::size_t... Idx>
+		static void advance_iterators(IteratorTuple& iterators, std::index_sequence<Idx...>) noexcept{
+			if constexpr (sizeof...(Idx) != 0){
+				(++std::get<Idx>(iterators), ...);
+			}
+		}
+
+		template <
+			typename T,
+			std::size_t ParamIdx,
+			tuple_spec MaterializedParams,
+			typename IteratorTuple,
+			typename RowStorage>
+		[[nodiscard]] static decltype(auto) each_argument(
+			IteratorTuple& iterators,
+			RowStorage& row_storage) noexcept{
+			if constexpr (zero_storage_query_component_v<T>){
+				return std::get<ParamIdx>(row_storage);
+			}else{
+				static constexpr std::size_t iterator_idx = tuple_index_v<T, MaterializedParams>;
+				return *std::get<iterator_idx>(iterators);
+			}
+		}
+
+		template <
+			bool PassManager,
+			tuple_spec Params,
+			tuple_spec MaterializedParams,
+			typename Fn,
+			typename S,
+			typename IteratorTuple,
+			typename RowStorage,
+			std::size_t... Idx>
+		static void invoke_each_row(
+			S& self,
+			Fn& fn,
+			IteratorTuple& iterators,
+			RowStorage& row_storage,
+			std::index_sequence<Idx...>){
+			if constexpr (PassManager){
+				std::invoke(
+					fn,
+					self,
+					component_manager::each_argument<
+						std::tuple_element_t<Idx, Params>,
+						Idx,
+						MaterializedParams>(iterators, row_storage)...);
+			}else{
+				(void)self;
+				std::invoke(
+					fn,
+					component_manager::each_argument<
+						std::tuple_element_t<Idx, Params>,
+						Idx,
+						MaterializedParams>(iterators, row_storage)...);
+			}
+		}
+
+		template <
+			bool FilterInsertedRows,
+			bool PassManager,
+			tuple_spec QueryTuple,
+			tuple_spec Params,
+			tuple_spec Exclusives,
+			typename Fn,
+			typename S>
+		static void each_query_rows(S& self, Fn fn){
+			static_assert(std::tuple_size_v<QueryTuple> > 0, "component_manager::each requires at least one query component");
+			static_assert(!tuple_has_duplicate_types_v<tuple_cat_t<QueryTuple, Exclusives>>,
+			              "component_manager::each query cannot contain duplicate include/exclude component types");
+
+			using materialized_params = materialized_query_tuple_t<QueryTuple>;
+			using row_storage_type = each_argument_storage_tuple_t<Params>;
+			static constexpr std::size_t materialized_count = std::tuple_size_v<materialized_params>;
+			if constexpr (FilterInsertedRows){
+				static_assert(contained_in<chunk_meta, materialized_params>,
+				              "filtered component_manager::each requires chunk_meta in the materialized query");
+			}
+
+			const auto matched_archetypes = self.template cached_archetype_query<QueryTuple, Exclusives>();
+			for(const archetype_query_match match : *matched_archetypes){
+				if constexpr (materialized_count == 0){
+					std::tuple<> iterators{};
+					const std::size_t count = match.archetype->size();
+					for(std::size_t i = 0; i != count; ++i){
+						row_storage_type row_storage{};
+						component_manager::invoke_each_row<PassManager, Params, materialized_params>(
+							self,
+							fn,
+							iterators,
+							row_storage,
+							std::make_index_sequence<std::tuple_size_v<Params>>{});
+					}
+				}else{
+					auto spans = self.template make_archetype_span_tuple<materialized_params>(
+						match.archetype,
+						std::make_index_sequence<materialized_count>{});
+					auto iterators = component_manager::make_span_iterators<materialized_params>(
+						spans,
+						std::make_index_sequence<materialized_count>{});
+					const auto count = std::ranges::size(std::get<0>(spans));
+
+					for(std::remove_cvref_t<decltype(count)> i = 0; i != count; ++i){
+						bool invoke_row = true;
+						if constexpr (FilterInsertedRows){
+							static constexpr std::size_t meta_idx = tuple_index_v<chunk_meta, materialized_params>;
+							invoke_row = component_manager::is_inserted_row(*std::get<meta_idx>(iterators));
+						}
+
+						if(invoke_row){
+							row_storage_type row_storage{};
+							component_manager::invoke_each_row<PassManager, Params, materialized_params>(
+								self,
+								fn,
+								iterators,
+								row_storage,
+								std::make_index_sequence<std::tuple_size_v<Params>>{});
+						}
+
+						component_manager::advance_iterators(
+							iterators,
+							std::make_index_sequence<materialized_count>{});
+					}
+				}
+			}
+		}
+
+	public:
 		template <typename Tuple>
 			requires (is_tuple_v<Tuple>)
 		auto get_slice_of() const{
 			static_assert(std::tuple_size_v<Tuple> > 0);
+			static_assert(!component_manager::tuple_has_zero_storage_component_v<Tuple>,
+			              "empty ECS tag components have no materialized slice");
 
 			using chunk_spans = unary_apply_to_tuple_t<strided_span, Tuple>;
 			using searched_spans = small_vector_of<chunk_spans>;
@@ -1365,159 +1597,38 @@ namespace mo_yanxi::game::ecs{
 		template <typename Exclusives = std::tuple<>, typename Fn, typename S>
 		FORCE_INLINE void each_unfiltered(this S& self, Fn fn){
 			using raw_params = remove_mfptr_this_args<Fn>;
+			static_assert(std::tuple_size_v<raw_params> > 0, "component_manager::each_unfiltered requires at least one component parameter");
 
-			if constexpr (std::same_as<std::remove_cvref_t<std::tuple_element_t<0, raw_params>>, component_manager>){
+			if constexpr (component_manager::first_param_is_component_manager_v<raw_params>){
 				using params = unary_apply_to_tuple_t<std::decay_t, tuple_drop_first_elem_t<raw_params>>;
-				using span_tuple = unary_apply_to_tuple_t<strided_span, params>;
-
-				self.template slice_and_then<params, Exclusives>([&self, f = std::move(fn)] FORCE_INLINE (const span_tuple& p) {
-					auto count = std::ranges::size(std::get<0>(p));
-
-					unary_apply_to_tuple_t<strided_span_iterator, params> iterators{};
-
-					[&] <std::size_t ...Idx> FORCE_INLINE (std::index_sequence<Idx...>) {
-						((std::get<Idx>(iterators) = std::ranges::begin(std::get<Idx>(p))), ...);
-					}(std::make_index_sequence<std::tuple_size_v<params>>{});
-
-					for(std::remove_cvref_t<decltype(count)> i = 0; i != count; ++i){
-						[&] <std::size_t ...Idx> FORCE_INLINE (std::index_sequence<Idx...>) {
-							std::invoke(f, self, *(std::get<Idx>(iterators)++) ...);
-						}(std::make_index_sequence<std::tuple_size_v<params>>{});
-					}
-				});
+				component_manager::each_query_rows<false, true, params, params, Exclusives>(self, std::move(fn));
 			}else{
 				using params = unary_apply_to_tuple_t<std::decay_t, raw_params>;
-				using span_tuple = unary_apply_to_tuple_t<strided_span, params>;
-
-				self.template slice_and_then<params, Exclusives>([f = std::move(fn)] FORCE_INLINE (const span_tuple& p) {
-					auto count = std::ranges::size(std::get<0>(p));
-
-					unary_apply_to_tuple_t<strided_span_iterator, params> iterators{};
-
-					[&] <std::size_t ...Idx> FORCE_INLINE (std::index_sequence<Idx...>) {
-						((std::get<Idx>(iterators) = std::ranges::begin(std::get<Idx>(p))), ...);
-					}(std::make_index_sequence<std::tuple_size_v<params>>{});
-
-					for(std::remove_cvref_t<decltype(count)> i = 0; i != count; ++i){
-						[&] <std::size_t ...Idx> FORCE_INLINE (std::index_sequence<Idx...>) {
-							std::invoke(f,
-								(assert(std::get<Idx>(iterators) != std::ranges::end(std::get<Idx>(p))),
-									*(std::get<Idx>(iterators)++)) ...);
-						}(std::make_index_sequence<std::tuple_size_v<params>>{});
-					}
-				});
+				component_manager::each_query_rows<false, false, params, params, Exclusives>(self, std::move(fn));
 			}
-
 		}
 
 		template <typename Exclusives = std::tuple<>, typename Fn, typename S>
 		FORCE_INLINE void each(this S& self, Fn fn){
 			using raw_params = remove_mfptr_this_args<Fn>;
 
-			if constexpr (std::same_as<std::remove_cvref_t<std::tuple_element_t<0, raw_params>>, component_manager>){
+			if constexpr (component_manager::first_param_is_component_manager_v<raw_params>){
 				using params = unary_apply_to_tuple_t<std::decay_t, tuple_drop_first_elem_t<raw_params>>;
 				if constexpr (contained_in<chunk_meta, params>){
-					using span_tuple = unary_apply_to_tuple_t<strided_span, params>;
-					static constexpr std::size_t meta_idx = tuple_index_v<chunk_meta, params>;
-
-					self.template slice_and_then<params, Exclusives>([&self, f = std::move(fn)] FORCE_INLINE (const span_tuple& p) {
-						auto count = std::ranges::size(std::get<0>(p));
-
-						unary_apply_to_tuple_t<strided_span_iterator, params> iterators{};
-
-						[&] <std::size_t ...Idx> FORCE_INLINE (std::index_sequence<Idx...>) {
-							((std::get<Idx>(iterators) = std::ranges::begin(std::get<Idx>(p))), ...);
-						}(std::make_index_sequence<std::tuple_size_v<params>>{});
-
-						for(std::remove_cvref_t<decltype(count)> i = 0; i != count; ++i){
-							[&] <std::size_t ...Idx> FORCE_INLINE (std::index_sequence<Idx...>) {
-								(assert(std::get<Idx>(iterators) != std::ranges::end(std::get<Idx>(p))), ...);
-								if(component_manager::is_inserted_row(*std::get<meta_idx>(iterators))){
-									std::invoke(f, self, *std::get<Idx>(iterators) ...);
-								}
-								(++std::get<Idx>(iterators), ...);
-							}(std::make_index_sequence<std::tuple_size_v<params>>{});
-						}
-					});
+					component_manager::each_query_rows<true, true, params, params, Exclusives>(self, std::move(fn));
 				}else{
 					using params_with_meta = tuple_cat_t<std::tuple<chunk_meta>, params>;
-					using span_tuple = unary_apply_to_tuple_t<strided_span, params_with_meta>;
-
-					self.template slice_and_then<params_with_meta, Exclusives>([&self, f = std::move(fn)] FORCE_INLINE (const span_tuple& p) {
-						auto count = std::ranges::size(std::get<0>(p));
-
-						unary_apply_to_tuple_t<strided_span_iterator, params_with_meta> iterators{};
-
-						[&] <std::size_t ...Idx> FORCE_INLINE (std::index_sequence<Idx...>) {
-							((std::get<Idx>(iterators) = std::ranges::begin(std::get<Idx>(p))), ...);
-						}(std::make_index_sequence<std::tuple_size_v<params_with_meta>>{});
-
-						for(std::remove_cvref_t<decltype(count)> i = 0; i != count; ++i){
-							[&] <std::size_t ...Idx> FORCE_INLINE (std::index_sequence<Idx...>) {
-								[&] <std::size_t ...InvokeIdx> FORCE_INLINE (std::index_sequence<InvokeIdx...>) {
-									(assert(std::get<Idx>(iterators) != std::ranges::end(std::get<Idx>(p))), ...);
-									if(component_manager::is_inserted_row(*std::get<0>(iterators))){
-										std::invoke(f, self, *std::get<InvokeIdx + 1>(iterators) ...);
-									}
-								}(std::make_index_sequence<std::tuple_size_v<params>>{});
-								(++std::get<Idx>(iterators), ...);
-							}(std::make_index_sequence<std::tuple_size_v<params_with_meta>>{});
-						}
-					});
+					component_manager::each_query_rows<true, true, params_with_meta, params, Exclusives>(self, std::move(fn));
 				}
 			}else{
 				using params = unary_apply_to_tuple_t<std::decay_t, raw_params>;
 				if constexpr (contained_in<chunk_meta, params>){
-					using span_tuple = unary_apply_to_tuple_t<strided_span, params>;
-					static constexpr std::size_t meta_idx = tuple_index_v<chunk_meta, params>;
-
-					self.template slice_and_then<params, Exclusives>([f = std::move(fn)] FORCE_INLINE (const span_tuple& p) {
-						auto count = std::ranges::size(std::get<0>(p));
-
-						unary_apply_to_tuple_t<strided_span_iterator, params> iterators{};
-
-						[&] <std::size_t ...Idx> FORCE_INLINE (std::index_sequence<Idx...>) {
-							((std::get<Idx>(iterators) = std::ranges::begin(std::get<Idx>(p))), ...);
-						}(std::make_index_sequence<std::tuple_size_v<params>>{});
-
-						for(std::remove_cvref_t<decltype(count)> i = 0; i != count; ++i){
-							[&] <std::size_t ...Idx> FORCE_INLINE (std::index_sequence<Idx...>) {
-								(assert(std::get<Idx>(iterators) != std::ranges::end(std::get<Idx>(p))), ...);
-								if(component_manager::is_inserted_row(*std::get<meta_idx>(iterators))){
-									std::invoke(f, *std::get<Idx>(iterators) ...);
-								}
-								(++std::get<Idx>(iterators), ...);
-							}(std::make_index_sequence<std::tuple_size_v<params>>{});
-						}
-					});
+					component_manager::each_query_rows<true, false, params, params, Exclusives>(self, std::move(fn));
 				}else{
 					using params_with_meta = tuple_cat_t<std::tuple<chunk_meta>, params>;
-					using span_tuple = unary_apply_to_tuple_t<strided_span, params_with_meta>;
-
-					self.template slice_and_then<params_with_meta, Exclusives>([f = std::move(fn)] FORCE_INLINE (const span_tuple& p) {
-						auto count = std::ranges::size(std::get<0>(p));
-
-						unary_apply_to_tuple_t<strided_span_iterator, params_with_meta> iterators{};
-
-						[&] <std::size_t ...Idx> FORCE_INLINE (std::index_sequence<Idx...>) {
-							((std::get<Idx>(iterators) = std::ranges::begin(std::get<Idx>(p))), ...);
-						}(std::make_index_sequence<std::tuple_size_v<params_with_meta>>{});
-
-						for(std::remove_cvref_t<decltype(count)> i = 0; i != count; ++i){
-							[&] <std::size_t ...Idx> FORCE_INLINE (std::index_sequence<Idx...>) {
-								[&] <std::size_t ...InvokeIdx> FORCE_INLINE (std::index_sequence<InvokeIdx...>) {
-									(assert(std::get<Idx>(iterators) != std::ranges::end(std::get<Idx>(p))), ...);
-									if(component_manager::is_inserted_row(*std::get<0>(iterators))){
-										std::invoke(f, *std::get<InvokeIdx + 1>(iterators) ...);
-									}
-								}(std::make_index_sequence<std::tuple_size_v<params>>{});
-								(++std::get<Idx>(iterators), ...);
-							}(std::make_index_sequence<std::tuple_size_v<params_with_meta>>{});
-						}
-					});
+					component_manager::each_query_rows<true, false, params_with_meta, params, Exclusives>(self, std::move(fn));
 				}
 			}
-
 		}
 
 		template <typename Exclusives = std::tuple<>, typename Fn, typename S>
@@ -1584,7 +1695,7 @@ namespace mo_yanxi::game::ecs{
 	private:
 
 		struct savement{
-			std::ptrdiff_t off;
+			std::size_t off;
 			std::size_t size;
 		};
 
@@ -1632,6 +1743,8 @@ namespace mo_yanxi::game::ecs{
 			requires (!tuple_has_duplicate_types_v<tuple_cat_t<Tuple, Exclusives>>)
 		void slice_and_then(Fn fn, ReserveFn reserve_fn = {}) const{
 			static_assert(std::tuple_size_v<Tuple> > 0);
+			static_assert(!component_manager::tuple_has_zero_storage_component_v<Tuple>,
+			              "empty ECS tag components have no materialized slice");
 			using chunk_spans = unary_apply_to_tuple_t<strided_span, Tuple>;
 			const auto matched_archetypes = this->template cached_archetype_query<Tuple, Exclusives>();
 
@@ -1674,9 +1787,11 @@ namespace mo_yanxi::game::ecs{
 		void add_new_archetype_map(archetype<Tuple>& type){
 			using archetype_t = archetype<Tuple>;
 
-			fixed_open_hash_map<type_identity_index, savement> type_to_index_map{0};
+			std::unordered_map<type_identity_index, savement> type_to_index_map{};
 
 			auto insert = [&, this]<typename T>(){
+				static_assert(!std::is_empty_v<T> || ::mo_yanxi::soa_zero_storage_column_v<T>,
+				              "empty ECS component types must be trivial zero-storage tags");
 				static constexpr type_identity_index idx{unstable_type_identity_of<T>()};
 
 				auto itr = type_to_archetype.find(idx);
@@ -1685,30 +1800,36 @@ namespace mo_yanxi::game::ecs{
 
 				auto make_mark = [&]{
 					if(!requires_resize)return;
-					type_to_index_map.seemly_clear();
-					type_to_index_map.reserve_exact(type_to_archetype.bucket_count());
+					type_to_index_map.clear();
+					type_to_index_map.reserve(type_to_archetype.size());
 					for (const auto & [key, value] : type_to_archetype){
-						type_to_index_map.try_emplace(key, value.data() - archetype_slices_.data(), value.size());
+						type_to_index_map.try_emplace(
+							key,
+							static_cast<std::size_t>(value.data() - archetype_slices_.data()),
+							value.size());
 					}
 				};
 
-
-
-				archetype_slice elem{
-					&type,
-					+[](archetype_base* arg) noexcept -> strided_span<std::byte>{
-						auto slice = static_cast<archetype_t*>(arg)->template slice<T>();
-						return strided_span<std::byte>{
-							const_cast<std::byte*>(reinterpret_cast<const std::byte*>(std::ranges::data(slice))),
-							slice.size(),
-							slice.stride()
+				constexpr archetype_slice::acquirer_type slice_getter = []{
+					if constexpr (std::is_empty_v<T>){
+						return static_cast<archetype_slice::acquirer_type>(nullptr);
+					}else{
+						return +[](archetype_base* arg) noexcept -> strided_span<std::byte>{
+							auto slice = static_cast<archetype_t*>(arg)->template slice<T>();
+							return strided_span<std::byte>{
+								const_cast<std::byte*>(reinterpret_cast<const std::byte*>(std::ranges::data(slice))),
+								slice.size(),
+								slice.stride()
+							};
 						};
 					}
-				};
+				}();
+
+				archetype_slice elem{&type, slice_getter};
 
 				if(itr != type_to_archetype.end()){
 					const auto span = itr->second;
-					const savement savement{span.data() - archetype_slices_.data(), span.size()};
+					const savement savement{static_cast<std::size_t>(span.data() - archetype_slices_.data()), span.size()};
 					//already has a span:
 					if(const auto it = std::ranges::lower_bound(span, elem); it == span.end() || it->identity() != elem.identity()){
 						make_mark();
@@ -1727,8 +1848,9 @@ namespace mo_yanxi::game::ecs{
 							}
 						}else{
 							for (auto&& [key, value] : type_to_archetype){
-								if(savement.off >= value.data() + value.size() - archetype_slices_.data()){
-								}else if(savement.off + savement.size <= value.data() - archetype_slices_.data()){
+								const auto value_offset = static_cast<std::size_t>(value.data() - archetype_slices_.data());
+								if(savement.off >= value_offset + value.size()){
+								}else if(savement.off + savement.size <= value_offset){
 									value = {value.data() + 1, value.size()};
 								}else{
 									value = {value.data(), value.size()  + 1};

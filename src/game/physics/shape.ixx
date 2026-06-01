@@ -349,6 +349,69 @@ export
 struct collision_shape_record;
 
 export
+struct collision_shape_query_transform{
+	math::trans2 transform{};
+	float cos{1.f};
+	float sin{};
+
+	[[nodiscard]] static constexpr bool is_identity(const math::trans2 transform) noexcept{
+		return transform.vec.is_zero() && transform.rot == 0.f;
+	}
+
+	[[nodiscard]] static constexpr collision_shape_query_transform make(const math::trans2 transform) noexcept{
+		const auto [cos_value, sin_value] = math::cos_sin(transform.rot);
+		return {
+			.transform = transform,
+			.cos = cos_value,
+			.sin = sin_value
+		};
+	}
+
+	[[nodiscard]] static constexpr collision_shape_query_transform combine(
+		const math::trans2 local,
+		const collision_shape_query_transform world) noexcept{
+		if(collision_shape_query_transform::is_identity(local)){
+			return world;
+		}
+
+		const math::trans2 transform{
+			world.apply_to(local.vec),
+			local.rot + world.transform.rot
+		};
+		if(local.rot == 0.f){
+			return {
+				.transform = transform,
+				.cos = world.cos,
+				.sin = world.sin
+			};
+		}
+		return collision_shape_query_transform::make(transform);
+	}
+
+	[[nodiscard]] constexpr math::vec2 rotate_to_local(math::vec2 direction) const noexcept{
+		direction.rotate(this->cos, -this->sin);
+		return direction;
+	}
+
+	[[nodiscard]] constexpr math::vec2 rotate_to_world(math::vec2 point) const noexcept{
+		point.rotate(this->cos, this->sin);
+		return point;
+	}
+
+	[[nodiscard]] constexpr math::vec2 apply_to(const math::vec2 point) const noexcept{
+		return this->rotate_to_world(point) + this->transform.vec;
+	}
+};
+
+export
+struct collision_shape_record_query{
+	const collision_shape_record* shape{};
+	collision_shape_query_transform transform{};
+
+	[[nodiscard]] math::vec2 support(math::vec2 direction, math::trans2 parent_transform = {}) const noexcept;
+};
+
+export
 template<polygon_vertex_range Vertices>
 [[nodiscard]] constexpr bool is_convex_polygon(Vertices&& vertices) noexcept{
 	if(std::ranges::size(vertices) < 3){
@@ -926,6 +989,50 @@ struct collision_shape_record{
 		});
 	}
 
+	[[nodiscard]] static bool validate_packed_data(
+		const std::span<const collision_shape_record_part> parts,
+		const std::span<const math::vec2> polygon_vertices) noexcept{
+		if(parts.empty()){
+			return polygon_vertices.empty();
+		}
+		if(parts.size() > std::numeric_limits<std::uint32_t>::max()
+			|| polygon_vertices.size() > std::numeric_limits<std::uint32_t>::max()){
+			return false;
+		}
+
+		for(const collision_shape_record_part& part : parts){
+			switch(part.type){
+			case shape_type::circle:
+			case shape_type::capsule:
+			case shape_type::box:
+				break;
+			case shape_type::convex_polygon:{
+				const auto offset = static_cast<std::size_t>(part.payload.convex_polygon.vertex_offset);
+				const auto count = static_cast<std::size_t>(part.payload.convex_polygon.vertex_count);
+				if(count < 3u || offset > polygon_vertices.size() || count > polygon_vertices.size() - offset){
+					return false;
+				}
+				break;
+			}
+			default:
+				return false;
+			}
+		}
+		return true;
+	}
+
+	void assign_packed_data(
+		const std::span<const collision_shape_record_part> parts,
+		const std::span<const math::vec2> polygon_vertices){
+		if(!collision_shape_record::validate_packed_data(parts, polygon_vertices)){
+			throw std::invalid_argument{"invalid collision shape record packed data"};
+		}
+
+		allocate(parts.size(), polygon_vertices.size());
+		std::ranges::copy(parts, parts_.begin());
+		std::ranges::copy(polygon_vertices, polygon_vertices_.begin());
+	}
+
 	[[nodiscard]] std::span<const collision_shape_record_part> records() const noexcept{
 		return parts_;
 	}
@@ -993,8 +1100,14 @@ struct collision_shape_record{
 	}
 
 	[[nodiscard]] math::vec2 support(const math::vec2 direction, const math::trans2 transform = {}) const noexcept{
+		return this->support_cached(direction, collision_shape_query_transform::make(transform));
+	}
+
+	[[nodiscard]] math::vec2 support_cached(
+		const math::vec2 direction,
+		const collision_shape_query_transform transform) const noexcept{
 		if(parts_.empty()){
-			return transform.vec;
+			return transform.transform.vec;
 		}
 
 		bool initialized{};
@@ -1002,10 +1115,8 @@ struct collision_shape_record{
 		float best_dot = -std::numeric_limits<float>::infinity();
 
 		for(const auto& part : parts_){
-			const auto part_transform = detail::combine_transform(part.local_transform, transform);
-			const auto local_direction = detail::to_local_direction(direction, part_transform);
-			const auto local_support = support_local(part, local_direction);
-			const auto world_support = local_support >> part_transform;
+			const auto part_transform = collision_shape_query_transform::combine(part.local_transform, transform);
+			const auto world_support = this->support_world(part, direction, part_transform);
 			const auto projected = world_support.dot(direction);
 			if(!initialized || projected > best_dot){
 				initialized = true;
@@ -1016,6 +1127,8 @@ struct collision_shape_record{
 
 		return best;
 	}
+
+	[[nodiscard]] collision_shape_record_query query(const math::trans2 transform = {}) const noexcept;
 
 	[[nodiscard]] math::frect aabb(const math::trans2 transform = {}) const noexcept{
 		if(parts_.empty()){
@@ -1042,6 +1155,35 @@ struct collision_shape_record{
 
 private:
 	using storage_allocator = mo_yanxi::aligned_allocator<std::byte, alignof(std::max_align_t)>;
+
+	[[nodiscard]] math::vec2 support_world(
+		const collision_shape_record_part& part,
+		const math::vec2 direction,
+		const collision_shape_query_transform transform) const noexcept{
+		const auto local_direction = transform.rotate_to_local(direction);
+		switch(part.type){
+			case shape_type::circle:
+				return transform.apply_to(detail::safe_normalized(local_direction) * part.payload.circle.radius);
+			case shape_type::capsule:{
+				const auto normal = detail::safe_normalized(local_direction);
+				const auto endpoint = part.payload.capsule.begin.dot(local_direction) > part.payload.capsule.end.dot(local_direction)
+					? part.payload.capsule.begin
+					: part.payload.capsule.end;
+				return transform.apply_to(endpoint + normal * part.payload.capsule.radius);
+			}
+			case shape_type::box:
+				return transform.apply_to({
+					local_direction.x >= 0.f ? part.payload.box.half_extent.x : -part.payload.box.half_extent.x,
+					local_direction.y >= 0.f ? part.payload.box.half_extent.y : -part.payload.box.half_extent.y
+				});
+			case shape_type::convex_polygon:{
+				const auto first = polygon_vertices_.begin() + part.payload.convex_polygon.vertex_offset;
+				const auto last = first + part.payload.convex_polygon.vertex_count;
+				return transform.apply_to(detail::support_vertices(first, last, local_direction));
+			}
+		}
+		return {};
+	}
 
 	static constexpr std::size_t align_up(const std::size_t value, const std::size_t alignment) noexcept{
 		return (value + alignment - 1) & ~(alignment - 1);
@@ -1123,5 +1265,26 @@ private:
 
 [[nodiscard]] inline collision_shape_record collision_shape::to_record() const{
 	return collision_shape_record{*this};
+}
+
+[[nodiscard]] inline collision_shape_record_query collision_shape_record::query(const math::trans2 transform) const noexcept{
+	return {
+		.shape = this,
+		.transform = collision_shape_query_transform::make(transform)
+	};
+}
+
+[[nodiscard]] inline math::vec2 collision_shape_record_query::support(
+	const math::vec2 direction,
+	const math::trans2 parent_transform) const noexcept{
+	if(collision_shape_query_transform::is_identity(parent_transform)){
+		return this->shape->support_cached(direction, this->transform);
+	}
+
+	return this->shape->support_cached(
+		direction,
+		collision_shape_query_transform::combine(
+			this->transform.transform,
+			collision_shape_query_transform::make(parent_transform)));
 }
 }
