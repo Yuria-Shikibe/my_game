@@ -45,6 +45,7 @@ import mo_yanxi.typesetting.util;
 import mo_yanxi.font;
 import mo_yanxi.font.manager;
 import mo_yanxi.graphic.color;
+import mo_yanxi.graphic.image_atlas;
 import mo_yanxi.graphic.msdf;
 import align;
 
@@ -181,7 +182,9 @@ struct csv_file_reader : head_body{
 
 #pragma endregion
 
-ui_outputs build_main_ui(backend::vulkan::context& ctx, renderer_frontend renderer){
+ui_outputs build_main_ui(backend::vulkan::context& ctx, renderer_frontend renderer, graphic::image_atlas& image_atlas){
+	game::ui::configure_collision_shape_editor_reference_images(image_atlas);
+
 	auto& ui_root = global::manager;
 	auto& res = ui_root.add_scene_resources("main");
 	auto style_pal_prov = gui::example::make_styles(res);
@@ -938,6 +941,7 @@ Edge Cases:
 }
 
 void clear_main_ui(){
+	game::ui::clear_collision_shape_editor_reference_images();
 	auto& ui_root = gui::global::manager;
 	ui_root.erase_scene("main");
 	ui_root.erase_resource("main");

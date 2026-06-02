@@ -14,6 +14,7 @@ import mo_yanxi.backend.vulkan.renderer.components;
 import mo_yanxi.game.profile.runtime;
 import mo_yanxi.graphic.draw.instruction;
 import mo_yanxi.graphic.draw.instruction.batch.backend.vulkan;
+import mo_yanxi.graphic.image_view_registry;
 import mo_yanxi.graphic_state_context;
 import mo_yanxi.gui.examples.default_config.constants;
 import mo_yanxi.gui.fx.config;
@@ -320,6 +321,8 @@ private:
 
 	vk::allocator_usage allocator_usage_{};
 	game_renderer_tables tables_{};
+	std::unique_ptr<graphic::image_view_registry> image_view_registry_{std::make_unique<graphic::image_view_registry>()};
+	graphic::sampler_descriptor_index default_sampler_index_{graphic::auto_sampler_index};
 
 	graphic::draw::instruction::draw_list_context batch_host_{};
 	graphic::draw::instruction::batch_vulkan_executor batch_device_{};
@@ -330,7 +333,6 @@ private:
 	backend::vulkan::renderer_frame_ring<frames_in_flight> frames_{};
 	vk::command_buffer attachment_clear_and_init_command_buffer_{};
 	command_recording_context record_ctx_{};
-	VkSampler sampler_{};
 	game_render_frame_state current_frame_state_{};
 	game_render_frame_stats last_frame_stats_{};
 	std::unique_ptr<game_2d_render_worker> worker_{};
@@ -557,7 +559,7 @@ private:
 			} else{
 				frame.fence.wait_and_reset();
 			}
-			batch_device_.upload(batch_host_, sampler_, frames_.current_index());
+			batch_device_.upload(batch_host_, *image_view_registry_, frames_.current_index());
 		} catch(...){
 			if(!frame.external_submit_fence){
 				frame.fence.reset();
@@ -581,10 +583,12 @@ public:
 	[[nodiscard]] explicit game_2d_renderer(game_2d_renderer_create_info&& create_info)
 		: allocator_usage_{create_info.allocator_usage},
 		  tables_{game_2d_renderer::make_tables()},
+		  default_sampler_index_{image_view_registry_->register_sampler(create_info.sampler)},
 		  batch_host_{
 			  game_2d_renderer::query_hardware_limits(create_info.allocator_usage),
 			  tables_.vertex,
-			  tables_.non_vertex
+			  tables_.non_vertex,
+			  *image_view_registry_
 		  },
 		  batch_device_{
 			  allocator_usage_,
@@ -615,8 +619,7 @@ public:
 					  }
 				  }
 			  }
-		  },
-		  sampler_{create_info.sampler}{
+		  }{
 		vk::shader_module draw_shader_vert{
 			allocator_usage_.get_device(),
 			create_info.shader_spv_path / game_2d_renderer_shader_names::draw_vert
@@ -685,6 +688,18 @@ public:
 		std::move_only_function<game_render_frame_stats(game_2d_renderer&, math::vec2)> frame_builder)
 		: game_2d_renderer{allocator, device, command_pool, sampler, shader_spv_path}{
 		this->set_frame_builder(std::move(frame_builder));
+	}
+
+	[[nodiscard]] graphic::image_view_registry& image_view_registry() noexcept{
+		return *image_view_registry_;
+	}
+
+	[[nodiscard]] const graphic::image_view_registry& image_view_registry() const noexcept{
+		return *image_view_registry_;
+	}
+
+	[[nodiscard]] graphic::sampler_descriptor_index default_sampler_index() const noexcept{
+		return default_sampler_index_;
 	}
 
 	[[nodiscard]] gui::renderer_frontend create_frontend() noexcept{

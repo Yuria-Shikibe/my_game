@@ -290,6 +290,19 @@ struct codec<game::physics::collision_shape_editor_part>
 };
 
 template <>
+struct codec<game::physics::collision_shape_editor_reference_image>
+	: srl::record_codec<
+		game::physics::collision_shape_editor_reference_image,
+		codec<game::physics::collision_shape_editor_reference_image>>{
+	using field_spec = std::tuple<
+		srl::field<1u, &game::physics::collision_shape_editor_reference_image::enabled>,
+		srl::field<2u, &game::physics::collision_shape_editor_reference_image::path>,
+		srl::field<3u, &game::physics::collision_shape_editor_reference_image::transform>,
+		srl::field<4u, &game::physics::collision_shape_editor_reference_image::half_extent>,
+		srl::field<5u, &game::physics::collision_shape_editor_reference_image::opacity>>;
+};
+
+template <>
 struct codec<game::physics::collision_shape_editor_document>
 	: srl::record_codec<
 		game::physics::collision_shape_editor_document,
@@ -298,6 +311,8 @@ struct codec<game::physics::collision_shape_editor_document>
 
 	using field_spec = std::tuple<
 		srl::field<1u, &game::physics::collision_shape_editor_document::parts>,
-		srl::field<2u, &game::physics::collision_shape_editor_document::mirror>>;
+		srl::field<2u, &game::physics::collision_shape_editor_document::mirror>,
+		srl::field<3u, &game::physics::collision_shape_editor_document::total_transform>,
+		srl::field<4u, &game::physics::collision_shape_editor_document::reference_image>>;
 };
 }

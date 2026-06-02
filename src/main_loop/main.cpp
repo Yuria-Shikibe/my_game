@@ -464,7 +464,8 @@ void prepare(
 			ctx,
 			ctx.graphic_family(),
 			ctx.get_device().graphic_queue(1),
-			renderer.get_heap_dynamic_image_section()
+			renderer.get_image_view_registry(),
+			renderer.get_default_sampler_index()
 		};
 	log::info({"GUI"}, "image atlas initialize done");
 
@@ -648,7 +649,10 @@ void prepare(
 	auto init_fn = [&](gui::example::main_loop_type& loop) -> gui::example::main_loop_init_return_t {
 		gui::example::main_loop_init_return_t ret{};
 
-		auto ui_providers = gui::example::build_main_ui(loop.get_ctx(), loop.get_renderer().create_frontend());
+		auto ui_providers = gui::example::build_main_ui(
+			loop.get_ctx(),
+			loop.get_renderer().create_frontend(),
+			image_atlas);
 		auto& scene = *ui_providers.scene_ptr;
 		ret.main_scene = ui_providers.scene_ptr;
 

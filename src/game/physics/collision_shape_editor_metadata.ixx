@@ -50,9 +50,13 @@ inline constexpr float polygon_epsilon = 1.0e-5f;
 }
 
 template <typename Shape>
-void append_runtime_part(collision_shape& out, const math::trans2 local_transform, Shape shape){
+void append_runtime_part(
+	collision_shape& out,
+	const math::trans2 local_transform,
+	const math::trans2 total_transform,
+	Shape shape){
 	out.add(shape_of<Shape>{
-		.local_transform = local_transform,
+		.local_transform = local_transform >> total_transform,
 		.shape = std::move(shape)
 	});
 }
@@ -120,25 +124,26 @@ struct collision_shape_editor_part{
 		}
 	}
 
-	void append_to(collision_shape& out) const{
+	void append_to(collision_shape& out, const math::trans2 total_transform = {}) const{
 		if(!this->payload_valid()){
 			throw std::invalid_argument{"invalid collision shape editor part"};
 		}
 
 		switch(type){
 		case shape_type::circle:
-			editor_detail::append_runtime_part(out, local_transform, circle);
+			editor_detail::append_runtime_part(out, local_transform, total_transform, circle);
 			return;
 		case shape_type::capsule:
-			editor_detail::append_runtime_part(out, local_transform, capsule);
+			editor_detail::append_runtime_part(out, local_transform, total_transform, capsule);
 			return;
 		case shape_type::box:
-			editor_detail::append_runtime_part(out, local_transform, box);
+			editor_detail::append_runtime_part(out, local_transform, total_transform, box);
 			return;
 		case shape_type::convex_polygon:
 			editor_detail::append_runtime_part(
 				out,
 				local_transform,
+				total_transform,
 				physics::make_convex_polygon(convex_polygon.vertices));
 			return;
 		default:
@@ -232,9 +237,32 @@ export
 }
 
 export
+struct collision_shape_editor_reference_image{
+	bool enabled{};
+	std::string path{};
+	math::trans2 transform{};
+	math::vec2 half_extent{};
+	float opacity{0.35f};
+
+	[[nodiscard]] bool visible() const noexcept{
+		return enabled
+			&& !path.empty()
+			&& editor_detail::finite_vec2(transform.vec)
+			&& std::isfinite(transform.rot)
+			&& editor_detail::finite_vec2(half_extent)
+			&& half_extent.x > 0.f
+			&& half_extent.y > 0.f
+			&& std::isfinite(opacity)
+			&& opacity > 0.f;
+	}
+};
+
+export
 struct collision_shape_editor_document{
 	std::vector<collision_shape_editor_part> parts{};
 	collision_shape_editor_mirror_modifier mirror{};
+	math::trans2 total_transform{};
+	collision_shape_editor_reference_image reference_image{};
 
 	[[nodiscard]] std::size_t add_shape(const shape_type type, const math::vec2 position = {}){
 		parts.push_back(collision_shape_editor_part::make_default(type, position));
@@ -267,11 +295,11 @@ struct collision_shape_editor_document{
 	[[nodiscard]] collision_shape to_runtime_shape(const bool include_mirror = true) const{
 		collision_shape result{};
 		for(const collision_shape_editor_part& part : parts){
-			part.append_to(result);
+			part.append_to(result, total_transform);
 		}
 		if(include_mirror && mirror.active()){
 			for(const collision_shape_editor_part& part : parts){
-				physics::mirror_collision_shape_editor_part(part, mirror).append_to(result);
+				physics::mirror_collision_shape_editor_part(part, mirror).append_to(result, total_transform);
 			}
 		}
 		return result;
