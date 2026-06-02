@@ -109,6 +109,52 @@ inline constexpr float hit_epsilon = 1.0e-5f;
 	}
 }
 
+struct circle_shape_properties{
+	float radius{};
+};
+
+struct capsule_shape_properties{
+	math::vec2 begin{};
+	math::vec2 end{};
+	float radius{};
+	float length{};
+};
+
+struct box_shape_properties{
+	math::vec2 size{};
+};
+
+struct polygon_shape_properties{
+	std::size_t vertex_count{};
+};
+
+using shape_properties = std::variant<
+	circle_shape_properties,
+	capsule_shape_properties,
+	box_shape_properties,
+	polygon_shape_properties>;
+
+[[nodiscard]] shape_properties make_shape_properties(
+	const physics::collision_shape_editor_part& part) noexcept{
+	switch(part.type){
+	case physics::shape_type::circle:
+		return circle_shape_properties{.radius = part.circle.radius};
+	case physics::shape_type::capsule:
+		return capsule_shape_properties{
+			.begin = part.capsule.begin,
+			.end = part.capsule.end,
+			.radius = part.capsule.radius,
+			.length = (part.capsule.end - part.capsule.begin).length()
+		};
+	case physics::shape_type::box:
+		return box_shape_properties{.size = part.box.half_extent * 2.f};
+	case physics::shape_type::convex_polygon:
+		return polygon_shape_properties{.vertex_count = part.convex_polygon.vertices.size()};
+	default:
+		std::unreachable();
+	}
+}
+
 [[nodiscard]] constexpr bool operation_command_char_allowed(const char value) noexcept{
 	return value == '.'
 		|| value == '+'
@@ -371,8 +417,6 @@ struct collision_shape_editor_state{
 
 	void duplicate_selected();
 
-	void toggle_mirror_enabled();
-
 	void toggle_mirror_x();
 
 	void toggle_mirror_y();
@@ -445,8 +489,10 @@ private:
 	};
 
 	gui::elem* add_menu_overlay_{};
-	gui::overlay* reference_image_file_overlay_{};
+	gui::elem* reference_image_file_overlay_{};
 	math::vec2 pending_add_position_{};
+	math::vec2 last_cursor_scene_pos_{};
+	math::vec2 last_cursor_world_pos_{};
 	react_flow::node_holder_pinned<reference_image_path_listener> reference_image_path_node_;
 
 public:
@@ -459,6 +505,8 @@ public:
 		std::span<gui::elem* const> aboves) override;
 
 	gui::events::op_afterwards on_drag(gui::events::drag event) override;
+
+	gui::events::op_afterwards on_cursor_moved(gui::events::cursor_move event) override;
 
 	gui::events::op_afterwards on_key_input(input_handle::key_set key) override;
 
@@ -486,6 +534,8 @@ private:
 	void close_reference_image_file_selector();
 
 	void load_reference_image(const std::filesystem::path& path);
+
+	void refresh_cursor_cache_from_local(math::vec2 local_pos) noexcept;
 
 	void draw_editor_content() const;
 };
@@ -527,45 +577,427 @@ protected:
 	}
 };
 
-struct collision_shape_editor_properties_panel : gui::table{
-private:
-	struct numeric_row{
-		gui::elem* row{};
-		gui::direct_label* label{};
-		collision_shape_editor_float_input* input{};
-	};
+namespace{
+void set_collision_shape_editor_label_text(gui::direct_label* label, const std::string_view text){
+	if(label != nullptr){
+		label->set_tokenized_text(typesetting::tokenized_text{
+			std::string{text},
+			typesetting::tokenize_tag::raw
+		});
+	}
+}
 
-	struct check_row{
-		gui::elem* row{};
-		gui::direct_label* label{};
-		collision_shape_editor_check_box* check{};
-	};
+template <typename Function>
+void setup_collision_shape_editor_button(
+	gui::button<gui::direct_label>& button,
+	const std::string_view text,
+	Function function){
+	button.set_style(gui::style::family_variant::base_only);
+	button.set_fit_type(gui::label_fit_type::scl);
+	button.text_entire_align = align::pos::center;
+	button.set_tokenized_text({text});
+	button.set_button_callback(function);
+}
+}
 
-	collision_shape_editor_viewport* viewport_{};
-	gui::direct_label* title_{};
-	gui::direct_label* path_label_{};
-	numeric_row transform_x_{};
-	numeric_row transform_y_{};
-	numeric_row transform_rot_{};
-	numeric_row secondary_x_{};
-	numeric_row secondary_y_{};
-	numeric_row opacity_{};
-	check_row enabled_{};
-	check_row mirror_x_{};
-	check_row mirror_y_{};
-	numeric_row mirror_origin_x_{};
-	numeric_row mirror_origin_y_{};
-	numeric_row mirror_origin_rot_{};
-	gui::elem* reference_button_row_{};
+struct collision_shape_editor_numeric_property : gui::head_body_no_invariant{
+	gui::direct_label* label_{};
+	collision_shape_editor_float_input* input_{};
+	std::function<void(float)> on_value_changed{};
 
-public:
-	[[nodiscard]] collision_shape_editor_properties_panel(gui::scene& scene, gui::elem* parent)
-		: gui::table(scene, parent){
+	[[nodiscard]] collision_shape_editor_numeric_property(gui::scene& scene, gui::elem* parent)
+		: gui::head_body_no_invariant(scene, parent, gui::layout::layout_policy::vert_major){
 		this->set_style();
-		this->set_layout_spec(gui::layout::layout_policy::vert_major);
 		this->set_expand_policy(gui::layout::expand_policy::passive);
-		this->set_self_border(gui::border{}.set(8.f));
-		this->template_cell.set_height(30.f).set_width_passive(1.f).set_pad({2.f, 2.f});
+		this->set_head_size(128.f);
+		this->set_body_size({gui::layout::size_category::passive, 1.f});
+		this->set_pad(4.f);
+
+		this->create_head([this](gui::direct_label& label){
+			label.set_style(gui::style::family_variant::base_only);
+			label.set_fit_type(gui::label_fit_type::scl);
+			label.text_entire_align = align::pos::center_left;
+			label_ = std::addressof(label);
+		});
+		this->create_body([this](collision_shape_editor_float_input& input){
+			input.set_value_no_propagate(0.f);
+			input.on_value_changed = [this](const float value){
+				if(on_value_changed){
+					on_value_changed(value);
+				}
+			};
+			input_ = std::addressof(input);
+		});
+	}
+
+	void set_label_text(const std::string_view text) const{
+		set_collision_shape_editor_label_text(label_, text);
+	}
+
+	void set_value(const float value) const{
+		if(input_ != nullptr){
+			input_->set_value_no_propagate(value);
+		}
+	}
+
+	void set_property_active(const bool active){
+		this->invisible = !active;
+		if(input_ != nullptr){
+			input_->set_disabled(!active);
+		}
+	}
+};
+
+struct collision_shape_editor_check_property : gui::head_body_no_invariant{
+	gui::direct_label* label_{};
+	collision_shape_editor_check_box* check_{};
+	std::function<void(bool)> on_value_changed{};
+
+	[[nodiscard]] collision_shape_editor_check_property(gui::scene& scene, gui::elem* parent)
+		: gui::head_body_no_invariant(scene, parent, gui::layout::layout_policy::vert_major){
+		this->set_style();
+		this->set_expand_policy(gui::layout::expand_policy::passive);
+		this->set_head_size(128.f);
+		this->set_body_size(34.f);
+		this->set_pad(4.f);
+
+		this->create_head([this](gui::direct_label& label){
+			label.set_style(gui::style::family_variant::base_only);
+			label.set_fit_type(gui::label_fit_type::scl);
+			label.text_entire_align = align::pos::center_left;
+			label_ = std::addressof(label);
+		});
+		this->create_body([this](collision_shape_editor_check_box& check){
+			check.on_value_changed = [this](const bool value){
+				if(on_value_changed){
+					on_value_changed(value);
+				}
+			};
+			check_ = std::addressof(check);
+		});
+	}
+
+	void set_label_text(const std::string_view text) const{
+		set_collision_shape_editor_label_text(label_, text);
+	}
+
+	void set_checked(const bool value) const{
+		if(check_ != nullptr){
+			check_->set_checked_no_propagate(value);
+		}
+	}
+
+	void set_property_active(const bool active){
+		this->invisible = !active;
+		if(check_ != nullptr){
+			check_->set_disabled(!active);
+		}
+	}
+};
+
+struct collision_shape_editor_text_property : gui::head_body_no_invariant{
+	gui::direct_label* label_{};
+	gui::direct_label* value_{};
+
+	[[nodiscard]] collision_shape_editor_text_property(gui::scene& scene, gui::elem* parent)
+		: gui::head_body_no_invariant(scene, parent, gui::layout::layout_policy::vert_major){
+		this->set_style();
+		this->set_expand_policy(gui::layout::expand_policy::passive);
+		this->set_head_size(128.f);
+		this->set_body_size({gui::layout::size_category::passive, 1.f});
+		this->set_pad(4.f);
+
+		this->create_head([this](gui::direct_label& label){
+			label.set_style(gui::style::family_variant::base_only);
+			label.set_fit_type(gui::label_fit_type::scl);
+			label.text_entire_align = align::pos::center_left;
+			label_ = std::addressof(label);
+		});
+		this->create_body([this](gui::direct_label& value){
+			value.set_style(gui::style::family_variant::base_only);
+			value.set_fit_type(gui::label_fit_type::scl);
+			value.text_entire_align = align::pos::center_left;
+			value_ = std::addressof(value);
+		});
+	}
+
+	void set_label_text(const std::string_view text) const{
+		set_collision_shape_editor_label_text(label_, text);
+	}
+
+	void set_value_text(const std::string_view text) const{
+		set_collision_shape_editor_label_text(value_, text);
+	}
+
+	void set_property_active(const bool active){
+		this->invisible = !active;
+	}
+};
+
+struct collision_shape_editor_transform_properties : gui::sequence{
+	collision_shape_editor_numeric_property* x_{};
+	collision_shape_editor_numeric_property* y_{};
+	collision_shape_editor_numeric_property* rot_{};
+
+	std::function<void(float)> on_x_changed{};
+	std::function<void(float)> on_y_changed{};
+	std::function<void(float)> on_rot_degrees_changed{};
+
+	[[nodiscard]] collision_shape_editor_transform_properties(gui::scene& scene, gui::elem* parent)
+		: gui::sequence(scene, parent, gui::layout::layout_policy::hori_major){
+		this->set_style();
+		this->set_expand_policy(gui::layout::expand_policy::resize_to_fit);
+		this->template_cell.set_size(32.f).set_pad({2.f, 2.f});
+
+		auto x = this->emplace_back<collision_shape_editor_numeric_property>();
+		auto y = this->emplace_back<collision_shape_editor_numeric_property>();
+		auto rot = this->emplace_back<collision_shape_editor_numeric_property>();
+		x_ = std::addressof(x.elem());
+		y_ = std::addressof(y.elem());
+		rot_ = std::addressof(rot.elem());
+		x_->set_label_text("X");
+		y_->set_label_text("Y");
+		rot_->set_label_text("Rotation");
+		x_->on_value_changed = [this](const float value){
+			if(on_x_changed){
+				on_x_changed(value);
+			}
+		};
+		y_->on_value_changed = [this](const float value){
+			if(on_y_changed){
+				on_y_changed(value);
+			}
+		};
+		rot_->on_value_changed = [this](const float value){
+			if(on_rot_degrees_changed){
+				on_rot_degrees_changed(value);
+			}
+		};
+	}
+
+	void set_transform(const math::trans2 transform) const{
+		x_->set_value(transform.vec.x);
+		y_->set_value(transform.vec.y);
+		rot_->set_value(transform.rot / math::deg_to_rad);
+	}
+
+	void set_control_active(const bool active){
+		this->invisible = !active;
+	}
+};
+
+struct collision_shape_editor_mirror_properties : gui::sequence{
+	collision_shape_editor_text_property* status_{};
+	collision_shape_editor_check_property* mirror_x_{};
+	collision_shape_editor_check_property* mirror_y_{};
+	collision_shape_editor_transform_properties* origin_{};
+
+	std::function<void(bool)> on_mirror_x_changed{};
+	std::function<void(bool)> on_mirror_y_changed{};
+	std::function<void(float)> on_origin_x_changed{};
+	std::function<void(float)> on_origin_y_changed{};
+	std::function<void(float)> on_origin_rot_degrees_changed{};
+
+	[[nodiscard]] collision_shape_editor_mirror_properties(gui::scene& scene, gui::elem* parent)
+		: gui::sequence(scene, parent, gui::layout::layout_policy::hori_major){
+		this->set_style();
+		this->set_expand_policy(gui::layout::expand_policy::resize_to_fit);
+		this->template_cell.set_size(32.f).set_pad({2.f, 2.f});
+
+		auto status = this->emplace_back<collision_shape_editor_text_property>();
+		auto mirror_x = this->emplace_back<collision_shape_editor_check_property>();
+		auto mirror_y = this->emplace_back<collision_shape_editor_check_property>();
+		auto origin = this->emplace_back<collision_shape_editor_transform_properties>();
+		status_ = std::addressof(status.elem());
+		mirror_x_ = std::addressof(mirror_x.elem());
+		mirror_y_ = std::addressof(mirror_y.elem());
+		origin_ = std::addressof(origin.elem());
+
+		status_->set_label_text("Mirror");
+		mirror_x_->set_label_text("Mirror X");
+		mirror_y_->set_label_text("Mirror Y");
+		origin_->x_->set_label_text("Mirror Origin X");
+		origin_->y_->set_label_text("Mirror Origin Y");
+		origin_->rot_->set_label_text("Mirror Rotation");
+
+		mirror_x_->on_value_changed = [this](const bool value){
+			if(on_mirror_x_changed){
+				on_mirror_x_changed(value);
+			}
+		};
+		mirror_y_->on_value_changed = [this](const bool value){
+			if(on_mirror_y_changed){
+				on_mirror_y_changed(value);
+			}
+		};
+		origin_->on_x_changed = [this](const float value){
+			if(on_origin_x_changed){
+				on_origin_x_changed(value);
+			}
+		};
+		origin_->on_y_changed = [this](const float value){
+			if(on_origin_y_changed){
+				on_origin_y_changed(value);
+			}
+		};
+		origin_->on_rot_degrees_changed = [this](const float value){
+			if(on_origin_rot_degrees_changed){
+				on_origin_rot_degrees_changed(value);
+			}
+		};
+	}
+
+	void set_mirror(const physics::collision_shape_editor_mirror_modifier& mirror) const{
+		std::string status = "Off";
+		if(mirror.active()){
+			status = "On";
+			if(mirror.mirror_x){
+				status += " X";
+			}
+			if(mirror.mirror_y){
+				status += " Y";
+			}
+		}
+		status_->set_value_text(status);
+		mirror_x_->set_checked(mirror.mirror_x);
+		mirror_y_->set_checked(mirror.mirror_y);
+		origin_->set_transform(mirror.origin);
+	}
+
+	void set_control_active(const bool active){
+		this->invisible = !active;
+	}
+};
+
+struct collision_shape_editor_shape_properties_control : gui::sequence{
+	collision_shape_editor_numeric_property* primary_{};
+	collision_shape_editor_numeric_property* secondary_{};
+	collision_shape_editor_text_property* info_a_{};
+	collision_shape_editor_text_property* info_b_{};
+	collision_shape_editor_text_property* info_c_{};
+
+	std::function<void(float)> on_primary_changed{};
+	std::function<void(float)> on_secondary_changed{};
+
+	[[nodiscard]] collision_shape_editor_shape_properties_control(gui::scene& scene, gui::elem* parent)
+		: gui::sequence(scene, parent, gui::layout::layout_policy::hori_major){
+		this->set_style();
+		this->set_expand_policy(gui::layout::expand_policy::resize_to_fit);
+		this->template_cell.set_size(32.f).set_pad({2.f, 2.f});
+
+		auto primary = this->emplace_back<collision_shape_editor_numeric_property>();
+		auto secondary = this->emplace_back<collision_shape_editor_numeric_property>();
+		auto info_a = this->emplace_back<collision_shape_editor_text_property>();
+		auto info_b = this->emplace_back<collision_shape_editor_text_property>();
+		auto info_c = this->emplace_back<collision_shape_editor_text_property>();
+		primary_ = std::addressof(primary.elem());
+		secondary_ = std::addressof(secondary.elem());
+		info_a_ = std::addressof(info_a.elem());
+		info_b_ = std::addressof(info_b.elem());
+		info_c_ = std::addressof(info_c.elem());
+
+		primary_->on_value_changed = [this](const float value){
+			if(on_primary_changed){
+				on_primary_changed(value);
+			}
+		};
+		secondary_->on_value_changed = [this](const float value){
+			if(on_secondary_changed){
+				on_secondary_changed(value);
+			}
+		};
+	}
+
+	void set_shape(
+		const editor_detail::shape_properties& shape,
+		const std::optional<std::size_t> selected_vertex){
+		primary_->set_property_active(false);
+		secondary_->set_property_active(false);
+		info_a_->set_property_active(false);
+		info_b_->set_property_active(false);
+		info_c_->set_property_active(false);
+
+		std::visit([this, selected_vertex](const auto& properties){
+			using properties_type = std::remove_cvref_t<decltype(properties)>;
+			if constexpr(std::same_as<properties_type, editor_detail::circle_shape_properties>){
+				primary_->set_label_text("Radius");
+				primary_->set_value(properties.radius);
+				primary_->set_property_active(true);
+			}else if constexpr(std::same_as<properties_type, editor_detail::capsule_shape_properties>){
+				primary_->set_label_text("Radius");
+				primary_->set_value(properties.radius);
+				primary_->set_property_active(true);
+				info_a_->set_label_text("Begin");
+				info_a_->set_value_text(std::format("{:.3f}, {:.3f}", properties.begin.x, properties.begin.y));
+				info_b_->set_label_text("End");
+				info_b_->set_value_text(std::format("{:.3f}, {:.3f}", properties.end.x, properties.end.y));
+				info_c_->set_label_text("Length");
+				info_c_->set_value_text(std::format("{:.3f}", properties.length));
+				info_a_->set_property_active(true);
+				info_b_->set_property_active(true);
+				info_c_->set_property_active(true);
+			}else if constexpr(std::same_as<properties_type, editor_detail::box_shape_properties>){
+				primary_->set_label_text("Width");
+				secondary_->set_label_text("Height");
+				primary_->set_value(properties.size.x);
+				secondary_->set_value(properties.size.y);
+				primary_->set_property_active(true);
+				secondary_->set_property_active(true);
+			}else if constexpr(std::same_as<properties_type, editor_detail::polygon_shape_properties>){
+				info_a_->set_label_text("Vertices");
+				info_a_->set_value_text(std::format("{}", properties.vertex_count));
+				info_b_->set_label_text("Selected Vertex");
+				info_b_->set_value_text(selected_vertex
+					? std::format("{}", *selected_vertex)
+					: std::string{"None"});
+				info_a_->set_property_active(true);
+				info_b_->set_property_active(true);
+			}
+		}, shape);
+	}
+
+	void set_control_active(const bool active){
+		this->invisible = !active;
+	}
+};
+
+struct collision_shape_editor_reference_image_actions : gui::sequence{
+	std::function<void()> on_choose{};
+	std::function<void()> on_clear{};
+
+	[[nodiscard]] collision_shape_editor_reference_image_actions(gui::scene& scene, gui::elem* parent)
+		: gui::sequence(scene, parent, gui::layout::layout_policy::vert_major){
+		this->set_style();
+		this->set_expand_policy(gui::layout::expand_policy::passive);
+		this->template_cell.set_pad({2.f, 2.f});
+
+		auto choose = this->create_back([this](gui::button<gui::direct_label>& button){
+			setup_collision_shape_editor_button(button, "Choose Image", [this]{
+				if(on_choose){
+					on_choose();
+				}
+			});
+		});
+		choose.cell().set_passive(1.f);
+		auto clear = this->create_back([this](gui::button<gui::direct_label>& button){
+			setup_collision_shape_editor_button(button, "Clear", [this]{
+				if(on_clear){
+					on_clear();
+				}
+			});
+		});
+		clear.cell().set_size(72.f);
+	}
+};
+
+struct collision_shape_editor_mode_properties_panel : gui::sequence{
+	gui::direct_label* title_{};
+
+	[[nodiscard]] collision_shape_editor_mode_properties_panel(gui::scene& scene, gui::elem* parent)
+		: gui::sequence(scene, parent, gui::layout::layout_policy::hori_major){
+		this->set_style();
+		this->set_expand_policy(gui::layout::expand_policy::resize_to_fit);
+		this->template_cell.set_size(32.f).set_pad({2.f, 2.f});
 
 		auto title = this->create_back([this](gui::direct_label& label){
 			label.set_style(gui::style::family_variant::base_only);
@@ -573,52 +1005,190 @@ public:
 			label.text_entire_align = align::pos::center_left;
 			title_ = std::addressof(label);
 		});
-		title.cell().set_height(34.f);
+		title.cell().set_size(36.f);
+	}
 
-		transform_x_ = this->make_numeric_row("X");
-		transform_y_ = this->make_numeric_row("Y");
-		transform_rot_ = this->make_numeric_row("Rot");
-		secondary_x_ = this->make_numeric_row("Width");
-		secondary_y_ = this->make_numeric_row("Height");
-		opacity_ = this->make_numeric_row("Opacity");
-		enabled_ = this->make_check_row("Enabled");
-		mirror_x_ = this->make_check_row("Mirror X");
-		mirror_y_ = this->make_check_row("Mirror Y");
-		mirror_origin_x_ = this->make_numeric_row("Mirror OX");
-		mirror_origin_y_ = this->make_numeric_row("Mirror OY");
-		mirror_origin_rot_ = this->make_numeric_row("Mirror ORot");
+	void set_title(const std::string_view text) const{
+		set_collision_shape_editor_label_text(title_, text);
+	}
 
-		auto ref_buttons = this->create_back([this](gui::table& row){
-			row.set_style();
-			row.set_layout_spec(gui::layout::layout_policy::hori_major);
-			row.set_expand_policy(gui::layout::expand_policy::passive);
-			row.template_cell.set_height(30.f).set_width_passive(1.f).set_pad({2.f, 2.f});
-			row.create_back([this](gui::button<gui::direct_label>& button){
-				this->setup_button(button, "Choose Image", [this]{
-					if(viewport_ != nullptr){
-						viewport_->state.set_mode(editor_detail::editor_mode::reference_image);
-						viewport_->open_reference_image_file_selector();
-					}
-				});
-			}).cell().set_width_passive(1.f);
-			row.create_back([this](gui::button<gui::direct_label>& button){
-				this->setup_button(button, "Clear", [this]{
-					if(viewport_ != nullptr){
-						viewport_->state.clear_reference_image();
-					}
-				});
-			}).cell().set_width(68.f);
-		});
-		reference_button_row_ = std::addressof(ref_buttons.elem());
-		ref_buttons.cell().set_height(36.f);
+	void set_panel_active(const bool active){
+		this->invisible = !active;
+	}
+};
 
-		auto path = this->create_back([this](gui::direct_label& label){
-			label.set_style(gui::style::family_variant::base_only);
-			label.set_fit_type(gui::label_fit_type::scl);
-			label.text_entire_align = align::pos::center_left;
-			path_label_ = std::addressof(label);
-		});
-		path.cell().set_height(34.f);
+struct collision_shape_editor_object_mode_properties_panel : collision_shape_editor_mode_properties_panel{
+	collision_shape_editor_text_property* shape_{};
+	collision_shape_editor_transform_properties* transform_{};
+	collision_shape_editor_mirror_properties* mirror_{};
+
+	[[nodiscard]] collision_shape_editor_object_mode_properties_panel(gui::scene& scene, gui::elem* parent)
+		: collision_shape_editor_mode_properties_panel(scene, parent){
+		auto shape = this->emplace_back<collision_shape_editor_text_property>();
+		auto transform = this->emplace_back<collision_shape_editor_transform_properties>();
+		auto mirror = this->emplace_back<collision_shape_editor_mirror_properties>();
+		shape_ = std::addressof(shape.elem());
+		transform_ = std::addressof(transform.elem());
+		mirror_ = std::addressof(mirror.elem());
+		shape_->set_label_text("Shape");
+	}
+
+	void refresh(const collision_shape_editor_state& state){
+		const auto selected_index = state.object_mode.selected_part;
+		const auto* part = state.selected();
+		if(part == nullptr || !selected_index.has_value()){
+			this->set_title("Object Mode");
+			shape_->set_value_text("No selected object");
+			transform_->set_control_active(false);
+			mirror_->set_control_active(false);
+			return;
+		}
+
+		this->set_title(std::format(
+			"Object {}: {}",
+			*selected_index,
+			editor_detail::shape_type_name(part->type)));
+		shape_->set_value_text(std::format("{}", editor_detail::shape_type_name(part->type)));
+		transform_->set_transform(part->local_transform);
+		mirror_->set_mirror(part->mirror);
+		transform_->set_control_active(true);
+		mirror_->set_control_active(true);
+	}
+};
+
+struct collision_shape_editor_edit_mode_properties_panel : collision_shape_editor_mode_properties_panel{
+	collision_shape_editor_text_property* selection_{};
+	collision_shape_editor_shape_properties_control* shape_{};
+
+	[[nodiscard]] collision_shape_editor_edit_mode_properties_panel(gui::scene& scene, gui::elem* parent)
+		: collision_shape_editor_mode_properties_panel(scene, parent){
+		auto selection = this->emplace_back<collision_shape_editor_text_property>();
+		auto shape = this->emplace_back<collision_shape_editor_shape_properties_control>();
+		selection_ = std::addressof(selection.elem());
+		shape_ = std::addressof(shape.elem());
+		selection_->set_label_text("Selection");
+	}
+
+	void refresh(const collision_shape_editor_state& state){
+		const auto selected_index = state.edit_mode.selected_part;
+		const auto* part = state.selected();
+		if(part == nullptr || !selected_index.has_value()){
+			this->set_title("Edit Mode");
+			selection_->set_value_text("No selected shape");
+			shape_->set_control_active(false);
+			return;
+		}
+
+		this->set_title(std::format(
+			"Edit {}: {}",
+			*selected_index,
+			editor_detail::shape_type_name(part->type)));
+		selection_->set_value_text(state.edit_mode.selected_vertex
+			? std::format("Vertex {}", *state.edit_mode.selected_vertex)
+			: std::string{"Whole shape"});
+		shape_->set_shape(editor_detail::make_shape_properties(*part), state.edit_mode.selected_vertex);
+		shape_->set_control_active(true);
+	}
+};
+
+struct collision_shape_editor_reference_image_properties_panel : collision_shape_editor_mode_properties_panel{
+	collision_shape_editor_reference_image_actions* actions_{};
+	collision_shape_editor_text_property* path_{};
+	collision_shape_editor_check_property* visible_{};
+	collision_shape_editor_transform_properties* transform_{};
+	collision_shape_editor_numeric_property* width_{};
+	collision_shape_editor_numeric_property* height_{};
+	collision_shape_editor_numeric_property* opacity_{};
+
+	[[nodiscard]] collision_shape_editor_reference_image_properties_panel(gui::scene& scene, gui::elem* parent)
+		: collision_shape_editor_mode_properties_panel(scene, parent){
+		auto actions = this->emplace_back<collision_shape_editor_reference_image_actions>();
+		auto path = this->emplace_back<collision_shape_editor_text_property>();
+		auto visible = this->emplace_back<collision_shape_editor_check_property>();
+		auto transform = this->emplace_back<collision_shape_editor_transform_properties>();
+		auto width = this->emplace_back<collision_shape_editor_numeric_property>();
+		auto height = this->emplace_back<collision_shape_editor_numeric_property>();
+		auto opacity = this->emplace_back<collision_shape_editor_numeric_property>();
+		actions_ = std::addressof(actions.elem());
+		path_ = std::addressof(path.elem());
+		visible_ = std::addressof(visible.elem());
+		transform_ = std::addressof(transform.elem());
+		width_ = std::addressof(width.elem());
+		height_ = std::addressof(height.elem());
+		opacity_ = std::addressof(opacity.elem());
+
+		path_->set_label_text("Path");
+		visible_->set_label_text("Visible");
+		width_->set_label_text("Width");
+		height_->set_label_text("Height");
+		opacity_->set_label_text("Opacity");
+	}
+
+	void refresh(const physics::collision_shape_editor_reference_image& reference){
+		this->set_title("Reference Image");
+		path_->set_value_text(reference.path.empty() ? "No image" : reference.path);
+		visible_->set_checked(reference.enabled);
+		transform_->set_transform(reference.transform);
+		width_->set_value(reference.half_extent.x * 2.f);
+		height_->set_value(reference.half_extent.y * 2.f);
+		opacity_->set_value(reference.opacity);
+	}
+};
+
+struct collision_shape_editor_origin_properties_panel : collision_shape_editor_mode_properties_panel{
+	collision_shape_editor_transform_properties* transform_{};
+
+	[[nodiscard]] collision_shape_editor_origin_properties_panel(gui::scene& scene, gui::elem* parent)
+		: collision_shape_editor_mode_properties_panel(scene, parent){
+		auto transform = this->emplace_back<collision_shape_editor_transform_properties>();
+		transform_ = std::addressof(transform.elem());
+	}
+
+	void refresh(const math::trans2 transform){
+		this->set_title("Origin");
+		transform_->set_transform(transform);
+		transform_->set_control_active(true);
+	}
+};
+
+struct collision_shape_editor_properties_panel : gui::elem{
+private:
+	static constexpr std::size_t mode_panel_count = 4u;
+
+	enum class mode_panel_index : std::size_t{
+		object,
+		edit,
+		reference_image,
+		origin
+	};
+
+	collision_shape_editor_viewport* viewport_{};
+	std::array<gui::elem_ptr, mode_panel_count> panels_{};
+	std::array<gui::elem*, 1u> exposed_panel_{};
+	std::size_t active_panel_{static_cast<std::size_t>(mode_panel_index::object)};
+	std::size_t constructing_panel_{mode_panel_count};
+	gui::layout::expand_policy expand_policy_{};
+	collision_shape_editor_object_mode_properties_panel* object_panel_{};
+	collision_shape_editor_edit_mode_properties_panel* edit_panel_{};
+	collision_shape_editor_reference_image_properties_panel* reference_panel_{};
+	collision_shape_editor_origin_properties_panel* origin_panel_{};
+
+public:
+	[[nodiscard]] collision_shape_editor_properties_panel(gui::scene& scene, gui::elem* parent)
+		: gui::elem(scene, parent){
+		this->interactivity = gui::interactivity_flag::children_only;
+		this->set_style();
+		this->set_expand_policy(gui::layout::expand_policy::resize_to_fit);
+		this->set_self_border(gui::border{}.set(8.f));
+
+		object_panel_ = std::addressof(this->emplace_panel<collision_shape_editor_object_mode_properties_panel>(
+			static_cast<std::size_t>(mode_panel_index::object)));
+		edit_panel_ = std::addressof(this->emplace_panel<collision_shape_editor_edit_mode_properties_panel>(
+			static_cast<std::size_t>(mode_panel_index::edit)));
+		reference_panel_ = std::addressof(this->emplace_panel<collision_shape_editor_reference_image_properties_panel>(
+			static_cast<std::size_t>(mode_panel_index::reference_image)));
+		origin_panel_ = std::addressof(this->emplace_panel<collision_shape_editor_origin_properties_panel>(
+			static_cast<std::size_t>(mode_panel_index::origin)));
 
 		this->wire_callbacks();
 	}
@@ -628,142 +1198,205 @@ public:
 	}
 
 	bool update(const float delta_in_ticks) override{
-		if(!gui::table::update(delta_in_ticks)){
+		if(!gui::elem::update(delta_in_ticks)){
 			return false;
 		}
 		this->refresh();
 		return true;
 	}
 
+	[[nodiscard]] gui::layout::expand_policy get_expand_policy() const noexcept{
+		return expand_policy_;
+	}
+
+	void set_expand_policy(const gui::layout::expand_policy expand_policy){
+		if(gui::util::try_modify(expand_policy_, expand_policy)){
+			this->notify_layout_changed(gui::propagate_mask::upper);
+			this->layout_state.intercept_lower_to_isolated =
+				expand_policy == gui::layout::expand_policy::passive;
+		}
+	}
+
+	[[nodiscard]] gui::elem_span exposed_children() const noexcept override{
+		if(exposed_panel_[0] == nullptr){
+			return {};
+		}
+		return gui::elem_span{exposed_panel_};
+	}
+
+	gui::element_collect_buffer collect_children() const override{
+		gui::element_collect_buffer result{};
+		for(const auto& panel : panels_){
+			if(panel){
+				result.push_back(*panel);
+			}
+		}
+		return result;
+	}
+
+	bool decide_is_children_displayable_on_add(gui::elem&) override{
+		return this->is_at_display_stage() && constructing_panel_ == active_panel_;
+	}
+
+	void record_draw_layer(gui::draw_recorder& call_stack_builder) const override{
+		gui::elem::record_draw_layer(call_stack_builder);
+		this->active_panel().record_draw_layer(call_stack_builder);
+	}
+
+	void layout_elem() override{
+		gui::elem::layout_elem();
+		this->active_panel().try_layout();
+	}
+
+	bool update_abs_src(math::vec2 parent_content_src) noexcept override{
+		if(gui::elem::update_abs_src(parent_content_src)){
+			this->active_panel().update_abs_src(this->content_src_pos_abs());
+			return true;
+		}
+		return false;
+	}
+
+protected:
+	bool resize_impl(const math::vec2 size) override{
+		if(gui::elem::resize_impl(size)){
+			this->restrict_child(this->active_panel());
+			return true;
+		}
+		return false;
+	}
+
+	std::optional<math::vec2> pre_acquire_size_impl(gui::layout::optional_mastering_extent extent) override{
+		if(expand_policy_ == gui::layout::expand_policy::passive){
+			return std::nullopt;
+		}
+
+		auto result = this->active_panel().pre_acquire_size(extent);
+		if(!result){
+			return result;
+		}
+		return gui::util::select_prefer_extent(
+			expand_policy_ == gui::layout::expand_policy::prefer,
+			result.value(),
+			this->get_prefer_extent());
+	}
+
 private:
-	numeric_row make_numeric_row(const std::string_view text){
-		numeric_row result{};
-		auto handle = this->create_back([&](gui::table& row){
-			row.set_style();
-			row.set_layout_spec(gui::layout::layout_policy::hori_major);
-			row.set_expand_policy(gui::layout::expand_policy::passive);
-			row.template_cell.set_height(30.f).set_width_passive(1.f).set_pad({2.f, 2.f});
+	template <std::derived_from<gui::elem> Panel, typename... Args>
+		requires std::constructible_from<Panel, gui::scene&, gui::elem*, Args&&...>
+	Panel& emplace_panel(const std::size_t index, Args&&... args){
+		if(index >= panels_.size()){
+			throw std::out_of_range{"index out of properties panel range"};
+		}
 
-			auto label = row.create_back([&](gui::direct_label& value_label){
-				value_label.set_style(gui::style::family_variant::base_only);
-				value_label.set_fit_type(gui::label_fit_type::scl);
-				value_label.text_entire_align = align::pos::center_left;
-				value_label.set_tokenized_text({text});
-				result.label = std::addressof(value_label);
-			});
-			label.cell().set_width(86.f);
+		constructing_panel_ = index;
+		panels_[index] = gui::elem_ptr{
+			this->get_scene(),
+			this,
+			std::in_place_type<Panel>,
+			std::forward<Args>(args)...
+		};
+		constructing_panel_ = mode_panel_count;
 
-			auto input = row.create_back([&](collision_shape_editor_float_input& value_input){
-				value_input.set_value_no_propagate(0.f);
-				result.input = std::addressof(value_input);
-			});
-			input.cell().set_pending({true, false});
-		});
-		result.row = std::addressof(handle.elem());
-		return result;
+		if(index == active_panel_){
+			exposed_panel_[0] = panels_[index].get();
+		}
+
+		return static_cast<Panel&>(*panels_[index]);
 	}
 
-	check_row make_check_row(const std::string_view text){
-		check_row result{};
-		auto handle = this->create_back([&](gui::table& row){
-			row.set_style();
-			row.set_layout_spec(gui::layout::layout_policy::hori_major);
-			row.set_expand_policy(gui::layout::expand_policy::passive);
-			row.template_cell.set_height(30.f).set_width_passive(1.f).set_pad({2.f, 2.f});
-
-			auto label = row.create_back([&](gui::direct_label& value_label){
-				value_label.set_style(gui::style::family_variant::base_only);
-				value_label.set_fit_type(gui::label_fit_type::scl);
-				value_label.text_entire_align = align::pos::center_left;
-				value_label.set_tokenized_text({text});
-				result.label = std::addressof(value_label);
-			});
-			label.cell().set_width(110.f);
-
-			auto check = row.create_back([&](collision_shape_editor_check_box& value_check){
-				result.check = std::addressof(value_check);
-			});
-			check.cell().set_width(32.f);
-		});
-		result.row = std::addressof(handle.elem());
-		return result;
+	[[nodiscard]] gui::elem& active_panel() const noexcept{
+		return *panels_[active_panel_];
 	}
 
-	template <typename Function>
-	void setup_button(
-		gui::button<gui::direct_label>& button,
-		const std::string_view text,
-		Function function){
-		button.set_style(gui::style::family_variant::base_only);
-		button.set_fit_type(gui::label_fit_type::scl);
-		button.text_entire_align = align::pos::center;
-		button.set_tokenized_text({text});
-		button.set_button_callback(function);
-	}
+	void switch_to_panel(const std::size_t index){
+		if(index >= panels_.size()){
+			throw std::out_of_range{"index out of properties panel range"};
+		}
+		if(active_panel_ == index){
+			exposed_panel_[0] = panels_[active_panel_].get();
+			return;
+		}
 
-	static void set_row_visible(const numeric_row& row, const bool visible){
-		if(row.row != nullptr){
-			row.row->invisible = !visible;
-		}
-		if(row.input != nullptr){
-			row.input->set_disabled(!visible);
-		}
-	}
-
-	static void set_row_visible(const check_row& row, const bool visible){
-		if(row.row != nullptr){
-			row.row->invisible = !visible;
-		}
-		if(row.check != nullptr){
-			row.check->set_disabled(!visible);
-		}
-	}
-
-	static void set_label_text(gui::direct_label* label, const std::string_view text){
-		if(label != nullptr){
-			label->set_tokenized_text(typesetting::tokenized_text{
-				std::string{text},
-				typesetting::tokenize_tag::raw
-			});
-		}
+		this->active_panel().on_display_state_changed(false, false);
+		active_panel_ = index;
+		exposed_panel_[0] = panels_[active_panel_].get();
+		this->active_panel().on_display_state_changed(this->is_at_display_stage(), false);
+		this->restrict_child(this->active_panel());
+		this->active_panel().update_abs_src(this->content_src_pos_abs());
+		this->notify_isolated_layout_changed();
 	}
 
 	void wire_callbacks(){
-		transform_x_.input->on_value_changed = [this](const float value){
+		object_panel_->transform_->on_x_changed = [this](const float value){
 			this->set_transform_x(value);
 		};
-		transform_y_.input->on_value_changed = [this](const float value){
+		object_panel_->transform_->on_y_changed = [this](const float value){
 			this->set_transform_y(value);
 		};
-		transform_rot_.input->on_value_changed = [this](const float value){
+		object_panel_->transform_->on_rot_degrees_changed = [this](const float value){
 			this->set_transform_rot_degrees(value);
 		};
-		secondary_x_.input->on_value_changed = [this](const float value){
-			this->set_secondary_x(value);
-		};
-		secondary_y_.input->on_value_changed = [this](const float value){
-			this->set_secondary_y(value);
-		};
-		opacity_.input->on_value_changed = [this](const float value){
-			this->set_reference_opacity(value);
-		};
-		enabled_.check->on_value_changed = [this](const bool value){
-			this->set_enabled(value);
-		};
-		mirror_x_.check->on_value_changed = [this](const bool value){
+		object_panel_->mirror_->on_mirror_x_changed = [this](const bool value){
 			this->set_mirror_x(value);
 		};
-		mirror_y_.check->on_value_changed = [this](const bool value){
+		object_panel_->mirror_->on_mirror_y_changed = [this](const bool value){
 			this->set_mirror_y(value);
 		};
-		mirror_origin_x_.input->on_value_changed = [this](const float value){
+		object_panel_->mirror_->on_origin_x_changed = [this](const float value){
 			this->set_mirror_origin_x(value);
 		};
-		mirror_origin_y_.input->on_value_changed = [this](const float value){
+		object_panel_->mirror_->on_origin_y_changed = [this](const float value){
 			this->set_mirror_origin_y(value);
 		};
-		mirror_origin_rot_.input->on_value_changed = [this](const float value){
+		object_panel_->mirror_->on_origin_rot_degrees_changed = [this](const float value){
 			this->set_mirror_origin_rot_degrees(value);
+		};
+		edit_panel_->shape_->on_primary_changed = [this](const float value){
+			this->set_secondary_x(value);
+		};
+		edit_panel_->shape_->on_secondary_changed = [this](const float value){
+			this->set_secondary_y(value);
+		};
+		reference_panel_->actions_->on_choose = [this]{
+			if(viewport_ != nullptr){
+				viewport_->state.set_mode(editor_detail::editor_mode::reference_image);
+				viewport_->open_reference_image_file_selector();
+			}
+		};
+		reference_panel_->actions_->on_clear = [this]{
+			if(viewport_ != nullptr){
+				viewport_->state.clear_reference_image();
+			}
+		};
+		reference_panel_->visible_->on_value_changed = [this](const bool value){
+			this->set_reference_visible(value);
+		};
+		reference_panel_->transform_->on_x_changed = [this](const float value){
+			this->set_transform_x(value);
+		};
+		reference_panel_->transform_->on_y_changed = [this](const float value){
+			this->set_transform_y(value);
+		};
+		reference_panel_->transform_->on_rot_degrees_changed = [this](const float value){
+			this->set_transform_rot_degrees(value);
+		};
+		reference_panel_->width_->on_value_changed = [this](const float value){
+			this->set_secondary_x(value);
+		};
+		reference_panel_->height_->on_value_changed = [this](const float value){
+			this->set_secondary_y(value);
+		};
+		reference_panel_->opacity_->on_value_changed = [this](const float value){
+			this->set_reference_opacity(value);
+		};
+		origin_panel_->transform_->on_x_changed = [this](const float value){
+			this->set_transform_x(value);
+		};
+		origin_panel_->transform_->on_y_changed = [this](const float value){
+			this->set_transform_y(value);
+		};
+		origin_panel_->transform_->on_rot_degrees_changed = [this](const float value){
+			this->set_transform_rot_degrees(value);
 		};
 	}
 
@@ -776,167 +1409,27 @@ private:
 		auto& state = viewport_->state;
 		this->invisible = false;
 
-		this->set_common_rows_hidden();
 		switch(state.mode){
 		case editor_detail::editor_mode::object:
-			this->refresh_object();
+			this->switch_to_panel(static_cast<std::size_t>(mode_panel_index::object));
+			object_panel_->refresh(state);
 			break;
 		case editor_detail::editor_mode::edit:
-			this->refresh_edit();
+			this->switch_to_panel(static_cast<std::size_t>(mode_panel_index::edit));
+			edit_panel_->refresh(state);
 			break;
 		case editor_detail::editor_mode::reference_image:
-			this->refresh_reference();
+			this->switch_to_panel(static_cast<std::size_t>(mode_panel_index::reference_image));
+			reference_panel_->refresh(state.document.reference_image);
 			break;
 		case editor_detail::editor_mode::origin:
-			this->refresh_origin();
+			this->switch_to_panel(static_cast<std::size_t>(mode_panel_index::origin));
+			origin_panel_->refresh(state.document.total_transform);
 			break;
 		default:
 			this->invisible = true;
 			break;
 		}
-	}
-
-	void set_common_rows_hidden(){
-		collision_shape_editor_properties_panel::set_row_visible(transform_x_, false);
-		collision_shape_editor_properties_panel::set_row_visible(transform_y_, false);
-		collision_shape_editor_properties_panel::set_row_visible(transform_rot_, false);
-		collision_shape_editor_properties_panel::set_row_visible(secondary_x_, false);
-		collision_shape_editor_properties_panel::set_row_visible(secondary_y_, false);
-		collision_shape_editor_properties_panel::set_row_visible(opacity_, false);
-		collision_shape_editor_properties_panel::set_row_visible(enabled_, false);
-		collision_shape_editor_properties_panel::set_row_visible(mirror_x_, false);
-		collision_shape_editor_properties_panel::set_row_visible(mirror_y_, false);
-		collision_shape_editor_properties_panel::set_row_visible(mirror_origin_x_, false);
-		collision_shape_editor_properties_panel::set_row_visible(mirror_origin_y_, false);
-		collision_shape_editor_properties_panel::set_row_visible(mirror_origin_rot_, false);
-		if(reference_button_row_ != nullptr){
-			reference_button_row_->invisible = true;
-		}
-		if(path_label_ != nullptr){
-			path_label_->invisible = true;
-		}
-	}
-
-	void refresh_object(){
-		auto& state = viewport_->state;
-		const auto selected_index = state.object_mode.selected_part;
-		const auto* part = state.selected();
-		if(part == nullptr || !selected_index){
-			collision_shape_editor_properties_panel::set_label_text(title_, "Object: none");
-		}else{
-			collision_shape_editor_properties_panel::set_label_text(
-				title_,
-				std::format(
-					"Object {} {}",
-					*selected_index,
-					editor_detail::shape_type_name(part->type)));
-			transform_x_.input->set_value_no_propagate(part->local_transform.vec.x);
-			transform_y_.input->set_value_no_propagate(part->local_transform.vec.y);
-			transform_rot_.input->set_value_no_propagate(part->local_transform.rot / math::deg_to_rad);
-			collision_shape_editor_properties_panel::set_row_visible(transform_x_, true);
-			collision_shape_editor_properties_panel::set_row_visible(transform_y_, true);
-			collision_shape_editor_properties_panel::set_row_visible(transform_rot_, true);
-		}
-
-		enabled_.check->set_checked_no_propagate(state.document.mirror.enabled);
-		mirror_x_.check->set_checked_no_propagate(state.document.mirror.mirror_x);
-		mirror_y_.check->set_checked_no_propagate(state.document.mirror.mirror_y);
-		mirror_origin_x_.input->set_value_no_propagate(state.document.mirror.origin.vec.x);
-		mirror_origin_y_.input->set_value_no_propagate(state.document.mirror.origin.vec.y);
-		mirror_origin_rot_.input->set_value_no_propagate(state.document.mirror.origin.rot / math::deg_to_rad);
-		collision_shape_editor_properties_panel::set_label_text(enabled_.label, "Mirror");
-		collision_shape_editor_properties_panel::set_row_visible(enabled_, true);
-		collision_shape_editor_properties_panel::set_row_visible(mirror_x_, true);
-		collision_shape_editor_properties_panel::set_row_visible(mirror_y_, true);
-		collision_shape_editor_properties_panel::set_row_visible(mirror_origin_x_, true);
-		collision_shape_editor_properties_panel::set_row_visible(mirror_origin_y_, true);
-		collision_shape_editor_properties_panel::set_row_visible(mirror_origin_rot_, true);
-	}
-
-	void refresh_edit(){
-		auto& state = viewport_->state;
-		const auto selected_index = state.edit_mode.selected_part;
-		const auto* part = state.selected();
-		if(part == nullptr || !selected_index){
-			collision_shape_editor_properties_panel::set_label_text(title_, "Edit: none");
-			return;
-		}
-
-		collision_shape_editor_properties_panel::set_label_text(
-			title_,
-			std::format(
-				"Edit {} {}",
-				*selected_index,
-				editor_detail::shape_type_name(part->type)));
-
-		switch(part->type){
-		case physics::shape_type::circle:
-			collision_shape_editor_properties_panel::set_label_text(secondary_x_.label, "Radius");
-			secondary_x_.input->set_value_no_propagate(part->circle.radius);
-			collision_shape_editor_properties_panel::set_row_visible(secondary_x_, true);
-			break;
-		case physics::shape_type::capsule:
-			collision_shape_editor_properties_panel::set_label_text(secondary_x_.label, "Radius");
-			secondary_x_.input->set_value_no_propagate(part->capsule.radius);
-			collision_shape_editor_properties_panel::set_row_visible(secondary_x_, true);
-			break;
-		case physics::shape_type::box:
-			collision_shape_editor_properties_panel::set_label_text(secondary_x_.label, "Width");
-			collision_shape_editor_properties_panel::set_label_text(secondary_y_.label, "Height");
-			secondary_x_.input->set_value_no_propagate(part->box.half_extent.x * 2.f);
-			secondary_y_.input->set_value_no_propagate(part->box.half_extent.y * 2.f);
-			collision_shape_editor_properties_panel::set_row_visible(secondary_x_, true);
-			collision_shape_editor_properties_panel::set_row_visible(secondary_y_, true);
-			break;
-		case physics::shape_type::convex_polygon:
-			break;
-		default:
-			std::unreachable();
-		}
-	}
-
-	void refresh_reference(){
-		const auto& reference = viewport_->state.document.reference_image;
-		collision_shape_editor_properties_panel::set_label_text(title_, "Reference Image");
-		if(reference_button_row_ != nullptr){
-			reference_button_row_->invisible = false;
-		}
-		if(path_label_ != nullptr){
-			path_label_->invisible = false;
-			collision_shape_editor_properties_panel::set_label_text(
-				path_label_,
-				reference.path.empty() ? "No image" : reference.path);
-		}
-
-		enabled_.check->set_checked_no_propagate(reference.enabled);
-		transform_x_.input->set_value_no_propagate(reference.transform.vec.x);
-		transform_y_.input->set_value_no_propagate(reference.transform.vec.y);
-		transform_rot_.input->set_value_no_propagate(reference.transform.rot / math::deg_to_rad);
-		secondary_x_.input->set_value_no_propagate(reference.half_extent.x * 2.f);
-		secondary_y_.input->set_value_no_propagate(reference.half_extent.y * 2.f);
-		opacity_.input->set_value_no_propagate(reference.opacity);
-
-		collision_shape_editor_properties_panel::set_label_text(enabled_.label, "Visible");
-		collision_shape_editor_properties_panel::set_label_text(secondary_x_.label, "Width");
-		collision_shape_editor_properties_panel::set_label_text(secondary_y_.label, "Height");
-		collision_shape_editor_properties_panel::set_row_visible(enabled_, true);
-		collision_shape_editor_properties_panel::set_row_visible(transform_x_, true);
-		collision_shape_editor_properties_panel::set_row_visible(transform_y_, true);
-		collision_shape_editor_properties_panel::set_row_visible(transform_rot_, true);
-		collision_shape_editor_properties_panel::set_row_visible(secondary_x_, true);
-		collision_shape_editor_properties_panel::set_row_visible(secondary_y_, true);
-		collision_shape_editor_properties_panel::set_row_visible(opacity_, true);
-	}
-
-	void refresh_origin(){
-		const auto transform = viewport_->state.document.total_transform;
-		collision_shape_editor_properties_panel::set_label_text(title_, "Origin");
-		transform_x_.input->set_value_no_propagate(transform.vec.x);
-		transform_y_.input->set_value_no_propagate(transform.vec.y);
-		transform_rot_.input->set_value_no_propagate(transform.rot / math::deg_to_rad);
-		collision_shape_editor_properties_panel::set_row_visible(transform_x_, true);
-		collision_shape_editor_properties_panel::set_row_visible(transform_y_, true);
-		collision_shape_editor_properties_panel::set_row_visible(transform_rot_, true);
 	}
 
 	template <typename Function>
@@ -1173,63 +1666,69 @@ private:
 		});
 	}
 
-	void set_enabled(const bool value){
+	void set_reference_visible(const bool value){
 		this->edit_state([value](collision_shape_editor_state& state){
-			switch(state.mode){
-			case editor_detail::editor_mode::object:
-				if(state.document.mirror.enabled != value){
-					state.document.mirror.enabled = value;
-					return true;
-				}
-				return false;
-			case editor_detail::editor_mode::reference_image:
-				if(state.document.reference_image.enabled != value){
-					state.document.reference_image.enabled = value;
-					return true;
-				}
-				return false;
-			default:
+			if(state.mode != editor_detail::editor_mode::reference_image
+				|| state.document.reference_image.enabled == value){
 				return false;
 			}
+			state.document.reference_image.enabled = value;
+			return true;
 		});
 	}
 
 	void set_mirror_x(const bool value){
 		this->edit_state([value](collision_shape_editor_state& state){
-			if(state.mode != editor_detail::editor_mode::object || state.document.mirror.mirror_x == value){
+			if(state.mode != editor_detail::editor_mode::object){
 				return false;
 			}
-			state.document.mirror.mirror_x = value;
+			auto* part = state.selected();
+			if(part == nullptr || part->mirror.mirror_x == value){
+				return false;
+			}
+			part->mirror.mirror_x = value;
 			return true;
 		});
 	}
 
 	void set_mirror_y(const bool value){
 		this->edit_state([value](collision_shape_editor_state& state){
-			if(state.mode != editor_detail::editor_mode::object || state.document.mirror.mirror_y == value){
+			if(state.mode != editor_detail::editor_mode::object){
 				return false;
 			}
-			state.document.mirror.mirror_y = value;
+			auto* part = state.selected();
+			if(part == nullptr || part->mirror.mirror_y == value){
+				return false;
+			}
+			part->mirror.mirror_y = value;
 			return true;
 		});
 	}
 
 	void set_mirror_origin_x(const float value){
 		this->edit_state([value](collision_shape_editor_state& state){
-			if(state.mode != editor_detail::editor_mode::object || state.document.mirror.origin.vec.x == value){
+			if(state.mode != editor_detail::editor_mode::object){
 				return false;
 			}
-			state.document.mirror.origin.vec.x = value;
+			auto* part = state.selected();
+			if(part == nullptr || part->mirror.origin.vec.x == value){
+				return false;
+			}
+			part->mirror.origin.vec.x = value;
 			return true;
 		});
 	}
 
 	void set_mirror_origin_y(const float value){
 		this->edit_state([value](collision_shape_editor_state& state){
-			if(state.mode != editor_detail::editor_mode::object || state.document.mirror.origin.vec.y == value){
+			if(state.mode != editor_detail::editor_mode::object){
 				return false;
 			}
-			state.document.mirror.origin.vec.y = value;
+			auto* part = state.selected();
+			if(part == nullptr || part->mirror.origin.vec.y == value){
+				return false;
+			}
+			part->mirror.origin.vec.y = value;
 			return true;
 		});
 	}
@@ -1237,10 +1736,14 @@ private:
 	void set_mirror_origin_rot_degrees(const float value){
 		const float radians = value * math::deg_to_rad;
 		this->edit_state([radians](collision_shape_editor_state& state){
-			if(state.mode != editor_detail::editor_mode::object || state.document.mirror.origin.rot == radians){
+			if(state.mode != editor_detail::editor_mode::object){
 				return false;
 			}
-			state.document.mirror.origin.rot = radians;
+			auto* part = state.selected();
+			if(part == nullptr || part->mirror.origin.rot == radians){
+				return false;
+			}
+			part->mirror.origin.rot = radians;
 			return true;
 		});
 	}
@@ -1460,6 +1963,9 @@ std::size_t collision_shape_editor_state::add_shape(
 	const physics::shape_type type,
 	const math::vec2 position,
 	const bool record_history){
+	if(this->operation_active()){
+		this->cancel_operation();
+	}
 	const std::size_t index = document.add_shape(type, position);
 	object_mode.selected_part = index;
 	edit_mode.selected_part = index;
@@ -1543,20 +2049,28 @@ void collision_shape_editor_state::duplicate_selected(){
 	this->push_history();
 }
 
-void collision_shape_editor_state::toggle_mirror_enabled(){
-	document.mirror.enabled = !document.mirror.enabled;
-	last_error.clear();
-	this->push_history();
-}
-
 void collision_shape_editor_state::toggle_mirror_x(){
-	document.mirror.mirror_x = !document.mirror.mirror_x;
+	if(this->operation_active()){
+		this->cancel_operation();
+	}
+	auto* part = this->selected();
+	if(part == nullptr){
+		return;
+	}
+	part->mirror.mirror_x = !part->mirror.mirror_x;
 	last_error.clear();
 	this->push_history();
 }
 
 void collision_shape_editor_state::toggle_mirror_y(){
-	document.mirror.mirror_y = !document.mirror.mirror_y;
+	if(this->operation_active()){
+		this->cancel_operation();
+	}
+	auto* part = this->selected();
+	if(part == nullptr){
+		return;
+	}
+	part->mirror.mirror_y = !part->mirror.mirror_y;
 	last_error.clear();
 	this->push_history();
 }
@@ -2259,6 +2773,7 @@ bool collision_shape_editor_viewport::update(const float delta_in_ticks){
 gui::events::op_afterwards collision_shape_editor_viewport::on_click(
 	const gui::events::click event,
 	std::span<gui::elem* const> aboves){
+	this->refresh_cursor_cache_from_local(event.pos);
 	if(add_menu_overlay_ != nullptr
 		&& event.key.action == input_handle::act::press
 		&& !editor_detail::contains_inbound_elem(*add_menu_overlay_, this->get_scene().get_inbounds())){
@@ -2268,14 +2783,14 @@ gui::events::op_afterwards collision_shape_editor_viewport::on_click(
 	if(reference_image_file_overlay_ != nullptr
 		&& event.key.action == input_handle::act::press
 		&& !editor_detail::contains_inbound_elem(
-			*reference_image_file_overlay_->get(),
+			*reference_image_file_overlay_,
 			this->get_scene().get_inbounds())){
 		this->close_reference_image_file_selector();
 		return gui::events::op_afterwards::intercepted;
 	}
 
 	if(event.key.as_mouse() == input_handle::mouse::LMB && event.within_elem(*this)){
-		const math::vec2 world_pos = this->local_world_pos(event.pos);
+		const math::vec2 world_pos = this->cursor_world_pos();
 		if(state.operation_active()){
 			if(event.key.action == input_handle::act::release){
 				static_cast<void>(state.preview_operation(world_pos));
@@ -2292,11 +2807,17 @@ gui::events::op_afterwards collision_shape_editor_viewport::on_click(
 }
 
 gui::events::op_afterwards collision_shape_editor_viewport::on_drag(const gui::events::drag event){
+	this->refresh_cursor_cache_from_local(event.dst);
 	if(event.key.as_mouse() == input_handle::mouse::LMB && state.operation_active()){
-		static_cast<void>(state.preview_operation(this->local_world_pos(event.dst)));
+		static_cast<void>(state.preview_operation(this->cursor_world_pos()));
 		return gui::events::op_afterwards::intercepted;
 	}
 	return gui::viewport::on_drag(event);
+}
+
+gui::events::op_afterwards collision_shape_editor_viewport::on_cursor_moved(const gui::events::cursor_move event){
+	this->refresh_cursor_cache_from_local(event.dst);
+	return gui::viewport::on_cursor_moved(event);
 }
 
 gui::events::op_afterwards collision_shape_editor_viewport::on_key_input(const input_handle::key_set key){
@@ -2496,8 +3017,7 @@ float collision_shape_editor_viewport::selection_radius() const noexcept{
 }
 
 math::vec2 collision_shape_editor_viewport::cursor_world_pos() const noexcept{
-	const math::vec2 local_pos = gui::util::transform_scene2local(*this, this->get_scene().get_cursor_pos());
-	return this->local_world_pos(local_pos);
+	return last_cursor_world_pos_;
 }
 
 math::vec2 collision_shape_editor_viewport::local_world_pos(const math::vec2 local_pos) const noexcept{
@@ -2511,12 +3031,11 @@ void collision_shape_editor_viewport::open_reference_image_file_selector(){
 void collision_shape_editor_viewport::show_add_menu(){
 	this->close_add_menu();
 	pending_add_position_ = this->cursor_world_pos();
-	const math::vec2 cursor = this->get_scene().get_cursor_pos();
 	auto result = this->get_scene().create_overlay(
 		{
 			.extent = gui::layout::extent_by_external,
 			.align = align::pos::top_left,
-			.absolute_offset = cursor + math::vec2{10.f, 10.f}
+			.absolute_offset = last_cursor_scene_pos_ + math::vec2{10.f, 10.f}
 		},
 		[this](gui::table& menu){
 			const auto add_menu_button = [this](
@@ -2569,12 +3088,12 @@ void collision_shape_editor_viewport::show_reference_image_file_selector(){
 			selector.set_cared_suffix({".png", ".jpg", ".jpeg", ".bmp", ".tga"});
 			selector.get_prov().connect_successor(reference_image_path_node_.node);
 		});
-	reference_image_file_overlay_ = std::addressof(result.dialog);
+	reference_image_file_overlay_ = std::addressof(result.elem());
 }
 
 void collision_shape_editor_viewport::close_reference_image_file_selector(){
 	if(reference_image_file_overlay_ != nullptr){
-		this->get_scene().close_overlay(reference_image_file_overlay_->get());
+		this->get_scene().close_overlay(reference_image_file_overlay_);
 		reference_image_file_overlay_ = nullptr;
 	}
 }
@@ -2594,6 +3113,11 @@ void collision_shape_editor_viewport::load_reference_image(const std::filesystem
 	}catch(const std::exception& e){
 		state.last_error = std::format("failed to load reference image: {}", e.what());
 	}
+}
+
+void collision_shape_editor_viewport::refresh_cursor_cache_from_local(const math::vec2 local_pos) noexcept{
+	last_cursor_scene_pos_ = gui::util::transform_local2scene(*this, local_pos);
+	last_cursor_world_pos_ = this->local_world_pos(local_pos);
 }
 
 void collision_shape_editor_viewport::draw_editor_content() const{
@@ -2685,8 +3209,8 @@ void collision_shape_editor_viewport::draw_editor_content() const{
 		}
 	};
 
-	const auto draw_mirror_axes = [this]{
-		const math::trans2 mirror_transform = state.document.mirror.origin;
+	const auto draw_mirror_axes = [this](const physics::collision_shape_editor_mirror_modifier& mirror){
+		const math::trans2 mirror_transform = mirror.origin;
 		const math::vec2 origin = mirror_transform.vec;
 		const auto push_axis = [this, origin, mirror_transform](math::vec2 direction, const graphic::color color){
 			direction.rotate_rad(mirror_transform.rot);
@@ -2698,10 +3222,10 @@ void collision_shape_editor_viewport::draw_editor_content() const{
 			});
 		};
 
-		if(state.document.mirror.mirror_x){
+		if(mirror.mirror_x){
 			push_axis({0.f, 1.f}, graphic::colors::CRIMSON.copy_set_a(0.75f));
 		}
-		if(state.document.mirror.mirror_y){
+		if(mirror.mirror_y){
 			push_axis({1.f, 0.f}, graphic::colors::LIME.copy_set_a(0.75f));
 		}
 	};
@@ -2804,16 +3328,16 @@ void collision_shape_editor_viewport::draw_editor_content() const{
 		.depth = 0.f
 	};
 
-	if(state.document.mirror.active()){
-		for(const physics::collision_shape_editor_part& part : state.document.parts){
-			const auto mirrored = physics::mirror_collision_shape_editor_part(part, state.document.mirror);
+	for(const physics::collision_shape_editor_part& part : state.document.parts){
+		if(part.mirror.active()){
+			const auto mirrored = physics::mirror_collision_shape_editor_part(part, part.mirror);
 			draw_part(
 				mirrored,
 				editor_detail::display_transform(state.document, mirrored),
 				mirrored_fill_style,
 				mirrored_outline_style);
+			draw_mirror_axes(part.mirror);
 		}
-		draw_mirror_axes();
 	}
 
 	for(std::size_t index = 0u; index != state.document.parts.size(); ++index){
@@ -2858,7 +3382,7 @@ collision_shape_editor::collision_shape_editor(gui::scene& scene, gui::elem* par
 
 	const auto add_button = [this, &controls]<typename Function>(
 		const std::string_view text,
-		Function function) -> gui::button<gui::direct_label>*{
+		Function function){
 		auto button = controls.create_back([text, function](gui::button<gui::direct_label>& b){
 			b.set_style(gui::style::family_variant::base_only);
 			b.set_fit_type(gui::label_fit_type::scl);
@@ -2870,13 +3394,9 @@ collision_shape_editor::collision_shape_editor(gui::scene& scene, gui::elem* par
 		return std::addressof(button.elem());
 	};
 
-	const auto add_shape_at_cursor = [this](const physics::shape_type type){
-		static_cast<void>(viewport_->state.add_shape(type, viewport_->cursor_world_pos()));
-	};
-
 	object_mode_button_ = add_button("Object", [this]{
-		viewport_->state.set_mode(editor_detail::editor_mode::object);
-	});
+			viewport_->state.set_mode(editor_detail::editor_mode::object);
+		});
 	edit_mode_button_ = add_button("Edit", [this]{
 		viewport_->state.set_mode(editor_detail::editor_mode::edit);
 	});
@@ -2890,17 +3410,17 @@ collision_shape_editor::collision_shape_editor(gui::scene& scene, gui::elem* par
 	origin_mode_button_ = add_button("Origin", [this]{
 		viewport_->state.set_mode(editor_detail::editor_mode::origin);
 	});
-	add_button("Add Circle", [this, add_shape_at_cursor]{
-		add_shape_at_cursor(physics::shape_type::circle);
+	add_button("Add Circle", [this]{
+		this->add_shape_at_cursor(physics::shape_type::circle);
 	});
-	add_button("Add Capsule", [this, add_shape_at_cursor]{
-		add_shape_at_cursor(physics::shape_type::capsule);
+	add_button("Add Capsule", [this]{
+		this->add_shape_at_cursor(physics::shape_type::capsule);
 	});
-	add_button("Add Box", [this, add_shape_at_cursor]{
-		add_shape_at_cursor(physics::shape_type::box);
+	add_button("Add Box", [this]{
+		this->add_shape_at_cursor(physics::shape_type::box);
 	});
-	add_button("Add Polygon", [this, add_shape_at_cursor]{
-		add_shape_at_cursor(physics::shape_type::convex_polygon);
+	add_button("Add Polygon", [this]{
+		this->add_shape_at_cursor(physics::shape_type::convex_polygon);
 	});
 	add_button("Duplicate", [this]{
 		viewport_->state.duplicate_selected();
@@ -2930,9 +3450,6 @@ collision_shape_editor::collision_shape_editor(gui::scene& scene, gui::elem* par
 	add_button("Clear Ref", [this]{
 		viewport_->state.clear_reference_image();
 	});
-	add_button("Mirror", [this]{
-		viewport_->state.toggle_mirror_enabled();
-	});
 	add_button("Mirror X", [this]{
 		viewport_->state.toggle_mirror_x();
 	});
@@ -2953,11 +3470,22 @@ collision_shape_editor::collision_shape_editor(gui::scene& scene, gui::elem* par
 	viewport.cell().region_scale = {0.f, 0.f, 1.f, 1.f};
 	viewport_ = std::addressof(viewport.elem());
 
-	auto properties = viewport_stack.emplace_back<collision_shape_editor_properties_panel>();
+	auto properties_scroll = viewport_stack.emplace_back<gui::scroll_adaptor<gui::sequence>>();
+	properties_scroll.elem().set_max_extent({400.f, std::numeric_limits<float>::infinity()});
+	properties_scroll.cell().region_scale = {0.f, 0.f, 0.30f, 0.40f};
+	properties_scroll.cell().region_align = align::pos::bottom_left;
+	properties_scroll.cell().unsaturate_cell_elem_align = align::pos::bottom_left;
+	properties_scroll.cell().margin = gui::border{.left = 8.f, .bottom = 8.f};
+
+	auto& properties_sequence = properties_scroll.elem().get_elem();
+	properties_sequence.set_style();
+	properties_sequence.set_layout_spec(gui::layout::layout_policy::hori_major);
+	properties_sequence.set_expand_policy(gui::layout::expand_policy::prefer);
+	properties_sequence.set_align_to_tail(true);
+
+	auto properties = properties_sequence.emplace_back<collision_shape_editor_properties_panel>();
 	properties.elem().bind(*viewport_);
-	properties.cell().region_scale = {0.f, 0.f, 0.36f, 0.58f};
-	properties.cell().region_align = align::pos::bottom_left;
-	properties.cell().margin = gui::border{.left = 8.f, .bottom = 8.f};
+	properties.cell().set_pending();
 	properties_panel_ = std::addressof(properties.elem());
 
 	auto status = viewport_stack.create_back([this](gui::direct_label& label){
@@ -2992,7 +3520,7 @@ bool collision_shape_editor::update(const float delta_in_ticks){
 	return true;
 }
 
-void collision_shape_editor::refresh_status_label(){
+void collision_shape_editor::refresh_status_label() const{
 	if(status_ != nullptr && viewport_ != nullptr){
 		const auto& state = viewport_->state;
 		if(object_mode_button_ != nullptr){
@@ -3008,15 +3536,32 @@ void collision_shape_editor::refresh_status_label(){
 			origin_mode_button_->set_toggled(state.mode == editor_detail::editor_mode::origin);
 		}
 
+		const auto* selected_part = state.selected();
+		std::string mirror_text{};
+		if(selected_part != nullptr){
+			mirror_text = selected_part->mirror.active() ? "on" : "off";
+			if(selected_part->mirror.mirror_x){
+				mirror_text += " X";
+			}
+			if(selected_part->mirror.mirror_y){
+				mirror_text += " Y";
+			}
+		}else{
+			const auto active_mirror_count = std::ranges::count_if(
+				state.document.parts,
+				[](const physics::collision_shape_editor_part& part){
+					return part.mirror.active();
+				});
+			mirror_text = std::format("{} active", active_mirror_count);
+		}
+
 		std::string status_text = std::format(
-			"mode: {} / parts: {} / selected: {} / op: {} / mirror: {}{}{} / ref: {}",
+			"mode: {} / parts: {} / selected: {} / op: {} / mirror: {} / ref: {}",
 			editor_detail::mode_name(state.mode),
 			state.part_count(),
 			state.selected_text(),
 			state.operation_text(),
-			state.document.mirror.enabled ? "on" : "off",
-			state.document.mirror.mirror_x ? " X" : "",
-			state.document.mirror.mirror_y ? " Y" : "",
+			mirror_text,
 			state.reference_image_loaded() && state.document.reference_image.visible() ? "loaded" : "none");
 		if(!state.last_error.empty()){
 			status_text += std::format(" / {}", state.last_error);
@@ -3026,6 +3571,10 @@ void collision_shape_editor::refresh_status_label(){
 			typesetting::tokenize_tag::raw
 		});
 	}
+}
+
+void collision_shape_editor::add_shape_at_cursor(const physics::shape_type type) const{
+	static_cast<void>(viewport_->state.add_shape(type, viewport_->cursor_world_pos()));
 }
 
 const physics::collision_shape_editor_document& collision_shape_editor::editor_metadata() const noexcept{

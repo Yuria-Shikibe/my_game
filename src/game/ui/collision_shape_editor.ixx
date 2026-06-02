@@ -41,7 +41,9 @@ public:
 	[[nodiscard]] physics::collision_shape_record packed_shape_record() const;
 
 private:
-	void refresh_status_label();
+	void refresh_status_label() const;
+
+	void add_shape_at_cursor(physics::shape_type type) const;
 };
 
 export

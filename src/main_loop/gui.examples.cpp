@@ -101,7 +101,7 @@ struct test_entry{
 #pragma region ExampleUIStructs
 struct csv_file_reader : head_body{
 	struct file_listener : react_flow::terminal<std::span<const std::filesystem::path>>{
-		gui::overlay* overlay;
+		gui::elem* overlay{};
 		csv_file_reader* carrier;
 
 		[[nodiscard]] explicit file_listener(csv_file_reader* carrier)
@@ -114,7 +114,7 @@ struct csv_file_reader : head_body{
 			if(sp.empty()) return;
 			auto& path = sp.front();
 
-			carrier->get_scene().close_overlay(std::exchange(overlay, nullptr)->element.get());
+			carrier->get_scene().close_overlay(std::exchange(overlay, nullptr));
 
 			util::post_elem_async_task(*carrier, [&](csv_file_reader& r){
 				return elem_async_yield_task{
@@ -159,7 +159,7 @@ struct csv_file_reader : head_body{
 			b.set_tokenized_text({"Select File"});
 			b.set_button_callback([this](direct_label& e){
 				auto& p = e.parent_ref<csv_file_reader>();
-				this->path_node_.node.overlay = &e.get_scene().create_overlay(
+				auto selector_overlay = e.get_scene().create_overlay(
 					{
 						.extent = {
 							{layout::size_category::passive, .95f},
@@ -169,7 +169,8 @@ struct csv_file_reader : head_body{
 					}, [this](cpd::file_selector& e){
 						e.set_cared_suffix({".csv"});
 						e.get_prov().connect_successor(this->path_node_.node);
-					}).dialog;
+					});
+				this->path_node_.node.overlay = std::addressof(selector_overlay.elem());
 			});
 		});
 		create_body([](cpd::data_table& data_table){

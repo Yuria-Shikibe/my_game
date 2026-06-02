@@ -64,13 +64,12 @@ void append_runtime_part(
 
 export
 struct collision_shape_editor_mirror_modifier{
-	bool enabled{};
-	bool mirror_x{true};
+	bool mirror_x{};
 	bool mirror_y{};
 	math::trans2 origin{};
 
 	[[nodiscard]] constexpr bool active() const noexcept{
-		return enabled && (mirror_x || mirror_y);
+		return mirror_x || mirror_y;
 	}
 };
 
@@ -82,6 +81,7 @@ struct collision_shape_editor_part{
 	capsule_shape capsule{{-40.f, 0.f}, {40.f, 0.f}, 12.f};
 	box_shape box{{40.f, 28.f}};
 	convex_polygon_shape convex_polygon{};
+	collision_shape_editor_mirror_modifier mirror{};
 
 	[[nodiscard]] static collision_shape_editor_part make_default(
 		const shape_type type,
@@ -260,7 +260,6 @@ struct collision_shape_editor_reference_image{
 export
 struct collision_shape_editor_document{
 	std::vector<collision_shape_editor_part> parts{};
-	collision_shape_editor_mirror_modifier mirror{};
 	math::trans2 total_transform{};
 	collision_shape_editor_reference_image reference_image{};
 
@@ -297,9 +296,11 @@ struct collision_shape_editor_document{
 		for(const collision_shape_editor_part& part : parts){
 			part.append_to(result, total_transform);
 		}
-		if(include_mirror && mirror.active()){
+		if(include_mirror){
 			for(const collision_shape_editor_part& part : parts){
-				physics::mirror_collision_shape_editor_part(part, mirror).append_to(result, total_transform);
+				if(part.mirror.active()){
+					physics::mirror_collision_shape_editor_part(part, part.mirror).append_to(result, total_transform);
+				}
 			}
 		}
 		return result;
