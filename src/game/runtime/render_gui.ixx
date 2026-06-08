@@ -3,10 +3,10 @@ export module mo_yanxi.game.runtime.render_gui;
 export import mo_yanxi.backend.vulkan.renderer;
 export import mo_yanxi.gui.renderer.frontend;
 
-import mo_yanxi.graphic.camera;
+import mo_yanxi.graphic.camera2;
 import mo_yanxi.graphic.color;
-import mo_yanxi.graphic.draw.instruction;
-import mo_yanxi.gui.examples.default_config.constants;
+import mo_yanxi.graphic.g2d;
+import mo_yanxi.gui.cfg.builtin.constants;
 import mo_yanxi.gui.fx.instruction_extension;
 import mo_yanxi.math.matrix3;
 import mo_yanxi.math.rect_ortho;
@@ -28,7 +28,7 @@ struct game_render_context{
 export
 struct gui_debug_render_system{
 	void draw(game_render_context& context, const graphic::camera2& camera) const{
-		using namespace graphic::draw::instruction;
+		using namespace graphic::g2d;
 
 		auto& renderer_frontend = context.frontend;
 		const auto extent = context.extent();
@@ -48,7 +48,7 @@ struct gui_debug_render_system{
 		renderer_frontend.notify_viewport_changed();
 
 		renderer_frontend.update_state(gui::fx::pipeline_config{
-			.pipeline_index = gui::example::gpip::idx::coordinate
+			.pipeline_index = gui::cfg::builtin::gpip::idx::coordinate
 		});
 		const auto world_region = camera.get_viewport();
 		renderer_frontend.push(rect_aabb{
@@ -59,10 +59,10 @@ struct gui_debug_render_system{
 		});
 
 		renderer_frontend.update_state(gui::fx::pipeline_config{
-			.pipeline_index = gui::example::gpip::idx::def
+			.pipeline_index = gui::cfg::builtin::gpip::idx::def
 		});
 		renderer_frontend.update_state(gui::fx::push_constant{
-			gui::example::gpip::default_draw_constants{}
+			gui::cfg::builtin::gpip::default_draw_constants{}
 		});
 
 		renderer_frontend.top_viewport().pop_local_transform();
@@ -71,15 +71,15 @@ struct gui_debug_render_system{
 		renderer_frontend.update_state(gui::fx::blit_config{
 			gui::fx::blit_config::full_screen_region,
 			{
-				.pipeline_index = gui::example::cpip_idx::blend,
-				.inout_define_index = gui::example::cpip_bind_idx::to_background
+				.pipeline_index = gui::cfg::builtin::cpip_idx::blend,
+				.inout_define_index = gui::cfg::builtin::cpip_bind_idx::to_background
 			}
 		});
 		renderer_frontend.update_state(gui::fx::pipeline_config{
-			.pipeline_index = gui::example::gpip::idx::def
+			.pipeline_index = gui::cfg::builtin::gpip::idx::def
 		});
 		renderer_frontend.update_state(gui::fx::push_constant{
-			gui::example::gpip::default_draw_constants{}
+			gui::cfg::builtin::gpip::default_draw_constants{}
 		});
 	}
 };

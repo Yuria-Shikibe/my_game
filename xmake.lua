@@ -73,6 +73,11 @@ function add_game_ui_sources()
     add_files("src/game/ui/**.cpp")
 end
 
+function add_game_editor_sources()
+    add_files("src/game/editor/**.ixx")
+    add_files("src/game/editor/**.cpp")
+end
+
 function add_game_profile_sources()
     add_files("profile/runtime/**.ixx")
     add_files("profile/runtime/**.cpp")
@@ -100,7 +105,7 @@ target("game")
     set_extension(".exe")
     set_languages("c++latest")
 
-    add_deps("xrgui.default")
+    add_deps("xrgui.default", "mo_yanxi.react_flow")
     add_ecs_entity_port_includes()
 
     set_warnings("all", "pedantic")
@@ -109,6 +114,7 @@ target("game")
     add_game_srl_sources()
     add_game_profile_sources()
     add_game_runtime_sources()
+    add_game_editor_sources()
     add_game_ui_sources()
     add_files("src/main_loop/**.ixx")
     add_files("src/main_loop/**.cpp")
@@ -120,6 +126,20 @@ target("game")
         set_policy("build.optimization.lto", true)
     end
 
+    after_build(function (target)
+        local xrgui_assets_dir = path.join(xrgui_dir, "properties/assets")
+        if os.isdir(xrgui_assets_dir) then
+            os.cp(xrgui_assets_dir, target:targetdir())
+        end
+
+        local src_spv_dir = path.join(current_dir, "properties/assets/shader/spv")
+        if os.isdir(src_spv_dir) then
+            local dst_spv_dir = path.join(target:targetdir(), "assets/shader/spv")
+            os.mkdir(dst_spv_dir)
+            os.cp(path.join(src_spv_dir, "*"), dst_spv_dir)
+        end
+    end)
+
 target_end()
 
 target("cpu_profile")
@@ -127,7 +147,7 @@ target("cpu_profile")
     set_extension(".exe")
     set_languages("c++latest")
 
-    add_deps("xrgui.default")
+    add_deps("xrgui.default", "mo_yanxi.react_flow")
     add_ecs_entity_port_includes()
 
     set_warnings("all", "pedantic")
@@ -161,7 +181,7 @@ target("game_tests")
     set_enabled(has_config("enable_tests"))
     set_default(has_config("enable_tests"))
 
-    add_deps("xrgui.default")
+    add_deps("xrgui.default", "mo_yanxi.react_flow")
     add_ecs_entity_port_includes()
     if has_config("enable_tests") then
         add_packages("gtest", "simdutf")
@@ -174,6 +194,8 @@ target("game_tests")
     add_game_profile_sources()
     add_game_ecs_sources()
     add_game_runtime_sources()
+    add_game_editor_sources()
+    add_game_ui_sources()
     add_game_entity_sources()
     add_files("external/xrgui/src/sync/sync_processor.ixx")
     add_files("tests/**.cpp")

@@ -3,7 +3,7 @@ export module mo_yanxi.game.runtime.draw.collision_shape_gui_draw;
 export import mo_yanxi.game.runtime.draw.collision_shape;
 export import mo_yanxi.game.runtime.draw.collision_shape_component;
 export import mo_yanxi.game.runtime.render_gui;
-export import mo_yanxi.graphic.camera;
+export import mo_yanxi.graphic.camera2;
 
 namespace mo_yanxi::game::draw{
 export

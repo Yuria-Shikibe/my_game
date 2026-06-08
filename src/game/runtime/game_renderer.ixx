@@ -3,13 +3,13 @@ export module mo_yanxi.game.runtime.game_renderer;
 export import mo_yanxi.game.ecs.component.manage;
 export import mo_yanxi.game.physics.shape;
 export import mo_yanxi.game.runtime.draw.collision_shape_style;
-export import mo_yanxi.graphic.camera;
+export import mo_yanxi.graphic.camera2;
 export import mo_yanxi.graphic.color;
 export import mo_yanxi.math.rect_ortho;
 export import mo_yanxi.math.trans2;
 export import mo_yanxi.math.vector2;
 
-import mo_yanxi.graphic.draw.instruction;
+import mo_yanxi.graphic.g2d;
 import std;
 
 namespace mo_yanxi::game{

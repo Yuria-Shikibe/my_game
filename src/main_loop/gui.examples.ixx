@@ -15,7 +15,7 @@ import mo_yanxi.react_flow;
 
 
 
-namespace mo_yanxi::gui::example{
+namespace mo_yanxi::gui::cfg::builtin{
 
 
 export
@@ -52,7 +52,11 @@ struct ui_outputs{
 };
 
 export
-ui_outputs build_main_ui(backend::vulkan::context& ctx, renderer_frontend r, graphic::image_atlas& image_atlas);
+ui_outputs build_main_ui(
+	backend::vulkan::context& ctx,
+	renderer_frontend r,
+	graphic::image_atlas& image_atlas,
+	window_thread_dispatcher& window_dispatcher);
 
 export
 void clear_main_ui();

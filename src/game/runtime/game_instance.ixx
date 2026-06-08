@@ -5,7 +5,7 @@ export import mo_yanxi.game.runtime.game_renderer;
 export import mo_yanxi.game.runtime.world;
 export import mo_yanxi.input_handle.input_event_queue;
 
-import mo_yanxi.graphic.camera;
+import mo_yanxi.graphic.camera2;
 import mo_yanxi.game.profile.runtime;
 import mo_yanxi.gui.renderer.frontend;
 import mo_yanxi.input_handle;

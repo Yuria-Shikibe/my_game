@@ -17,7 +17,7 @@ import mo_yanxi.backend.glfw.window;
 import mo_yanxi.backend.application_timer;
 import mo_yanxi.backend.vulkan.renderer;
 
-import mo_yanxi.graphic.draw.instruction;
+import mo_yanxi.graphic.g2d;
 import mo_yanxi.graphic.image_atlas;
 import mo_yanxi.graphic.compositor.manager;
 import mo_yanxi.graphic.compositor.post_process_pass;
@@ -32,7 +32,7 @@ import mo_yanxi.gui.assets.manager;
 import mo_yanxi.gui.renderer.frontend;
 import mo_yanxi.gui.fx.instruction_extension;
 
-import mo_yanxi.gui.default_config.assets;
+import mo_yanxi.gui.cfg.builtin.assets;
 import mo_yanxi.gui.image_regions;
 
 import mo_yanxi.font;
@@ -48,9 +48,9 @@ import mo_yanxi.react_flow;
 import mo_yanxi.core.platform;
 
 import mo_yanxi.game.profile.runtime;
-import mo_yanxi.gui.default_config.main_loop;
-import mo_yanxi.gui.examples.default_config.colored_cerr;
-import mo_yanxi.gui.examples.default_config.font_styles;
+import mo_yanxi.gui.cfg.builtin.main_loop;
+import mo_yanxi.gui.cfg.builtin.colored_cerr;
+import mo_yanxi.gui.cfg.builtin.font_styles;
 
 import mo_yanxi.gui.game_examples;
 import mo_yanxi.gui.game_examples.loop_exec;
@@ -73,7 +73,8 @@ struct alignas(16) tonemap_args{
 
 bool game_has_runtime_assets(const std::filesystem::path& base){
 	return std::filesystem::exists(base / "assets/shader/spv/ui.draw.vert.spv")
-		&& std::filesystem::exists(base / "assets/font/SourceHanSansCN-Regular.otf");
+		&& std::filesystem::exists(base / "assets/font/SourceHanSansCN-Regular.otf")
+		&& std::filesystem::exists(base / "assets/shader/spv/post_process.game.oit_emit.spv");
 }
 
 std::optional<std::string> game_get_environment_variable(const char* name){
@@ -88,16 +89,32 @@ std::optional<std::string> game_get_environment_variable(const char* name){
 	return result;
 }
 
-void game_configure_runtime_working_directory(){
+void game_configure_runtime_working_directory(const char* executable_path){
 	const auto cwd = std::filesystem::current_path();
 	if(game_has_runtime_assets(cwd)){
 		return;
 	}
 
-	std::array candidates{
-		cwd / "properties",
-		cwd / "external/xrgui/properties"
+	std::vector<std::filesystem::path> candidates{};
+	auto add_candidate = [&](std::filesystem::path candidate){
+		if(candidate.empty()){
+			return;
+		}
+		candidate = candidate.lexically_normal();
+		if(std::ranges::find(candidates, candidate) == candidates.end()){
+			candidates.push_back(std::move(candidate));
+		}
 	};
+
+	add_candidate(cwd / "properties");
+	add_candidate(cwd / "external/xrgui/properties");
+
+	if(executable_path != nullptr && executable_path[0] != '\0'){
+		const auto executable_dir = std::filesystem::absolute(std::filesystem::path{executable_path}).parent_path();
+		add_candidate(executable_dir);
+		add_candidate(executable_dir / "properties");
+	}
+
 	for(const auto& candidate : candidates){
 		if(game_has_runtime_assets(candidate)){
 			mo_yanxi::log::info(
@@ -138,7 +155,7 @@ template <
 	typename GetGameCommandBuffer,
 	typename SetGameGpuFence>
 void app_run(
-	mo_yanxi::gui::example::main_loop_type& main_loop,
+	mo_yanxi::gui::cfg::builtin::main_loop_type& main_loop,
 	std::vector<mo_yanxi::vk::command_buffer>& compositor_cmds,
 	AdvanceGame&& advance_game,
 	BeginGameRender&& begin_game_render,
@@ -177,6 +194,7 @@ void app_run(
 		};
 		game_trace(std::format("frame {}: begin", current_frame));
 		ctx.window().poll_events();
+		main_loop.get_window_dispatcher().drain();
 		timer.fetch_time();
 		const auto frame_delta = timer.global_delta();
 		profile_metrics.delta_seconds = static_cast<double>(frame_delta);
@@ -210,6 +228,7 @@ void app_run(
 		record_profile_phase(profile_metrics.request_game_render_ms);
 		game_trace(std::format("frame {}: request game render end {}", current_frame, game_render_request));
 		game_trace(std::format("frame {}: permit burst begin", current_frame));
+		main_loop.get_window_dispatcher().drain();
 		main_loop.permit_burst();
 		record_profile_phase(profile_metrics.permit_burst_ms);
 		game_trace(std::format("frame {}: permit burst end", current_frame));
@@ -220,6 +239,7 @@ void app_run(
 
 		game_trace(std::format("frame {}: wait term begin", current_frame));
 		main_loop.wait_term();
+		main_loop.get_window_dispatcher().drain();
 		record_profile_phase(profile_metrics.wait_gui_ms);
 		game_trace(std::format("frame {}: wait term end", current_frame));
 		game_trace(std::format("frame {}: wait game render begin {}", current_frame, game_render_request));
@@ -262,6 +282,7 @@ void app_run(
 			}
 		}
 	}
+	main_loop.get_window_dispatcher().drain();
 }
 
 void prepare(
@@ -281,6 +302,8 @@ void prepare(
 #pragma region InitRenderer
 	log::info({"GUI"}, "renderer initialize");
 	vk::sampler sampler_ui{ctx.get_device(), vk::preset::ui_texture_sampler};
+	graphic::image_view_registry image_view_registry{};
+	const auto ui_sampler_index = image_view_registry.register_sampler(sampler_ui);
 	//renderer should belong to main loop actually
 	auto renderer = [&]() -> backend::vulkan::renderer{
 		vk::shader_module draw_shader_vert{ctx.get_device(), shader_spv_path / "ui.draw.vert.spv"};
@@ -300,8 +323,8 @@ void prepare(
 		return {
 				renderer_create_info{
 					.allocator_usage = ctx.get_allocator(),
-					.command_pool = ctx.get_graphic_command_pool(),
-					.sampler = sampler_ui,
+					.command_queue_family = ctx.graphic_family(),
+					.image_view_registry = std::addressof(image_view_registry),
 					.attachment_draw_config = {
 						{
 							draw_attachment_config{
@@ -461,17 +484,24 @@ void prepare(
 #pragma region LoadResource
 	log::info({"GUI"}, "image atlas initialize");
 	image_atlas image_atlas{
-			ctx,
-			ctx.graphic_family(),
-			ctx.get_device().graphic_queue(1),
-			renderer.get_image_view_registry(),
-			renderer.get_default_sampler_index()
+			graphic::image_atlas_config{
+				.ctx_info = ctx,
+				.graphic_family_index = ctx.graphic_family(),
+				.loader_working_queue = ctx.get_device().graphic_queue(1),
+				.image_view_registry = std::addressof(image_view_registry),
+				.page_sampler_indices = {
+					{graphic::image_page_usage::regular, ui_sampler_index},
+					{graphic::image_page_usage::normal, ui_sampler_index},
+					{graphic::image_page_usage::sdf, ui_sampler_index},
+					{graphic::image_page_usage::msdf, ui_sampler_index},
+				}
+			}
 		};
 	log::info({"GUI"}, "image atlas initialize done");
 
 	log::info({"GUI"}, "font manager initialize");
 	font::font_manager font_manager{};
-	gui::example::init_font_manager(font_manager, image_atlas);
+	gui::cfg::builtin::init_font_manager(font_manager, image_atlas);
 	log::info({"GUI"}, "font manager initialize done");
 
 	{
@@ -493,8 +523,8 @@ void prepare(
 	{
 		log::info({"GUI"}, "generate icons and shapes");
 
-		gui::example::generate_default_shapes(image_atlas);
-		gui::example::load_default_icons(image_atlas);
+		gui::cfg::builtin::generate_default_shapes(image_atlas);
+		gui::cfg::builtin::load_default_icons(image_atlas);
 	}
 #pragma endregion
 
@@ -646,13 +676,14 @@ void prepare(
 #pragma endregion
 
 #pragma region GuiBindingFn
-	auto init_fn = [&](gui::example::main_loop_type& loop) -> gui::example::main_loop_init_return_t {
-		gui::example::main_loop_init_return_t ret{};
+	auto init_fn = [&](gui::cfg::builtin::main_loop_type& loop) -> gui::cfg::builtin::main_loop_init_return_t {
+		gui::cfg::builtin::main_loop_init_return_t ret{};
 
-		auto ui_providers = gui::example::build_main_ui(
+		auto ui_providers = gui::cfg::builtin::build_main_ui(
 			loop.get_ctx(),
 			loop.get_renderer().create_frontend(),
-			image_atlas);
+			image_atlas,
+			loop.get_window_dispatcher());
 		auto& scene = *ui_providers.scene_ptr;
 		ret.main_scene = ui_providers.scene_ptr;
 
@@ -660,64 +691,64 @@ void prepare(
 			scene.get_output_communicate_async_task_queue(0).post(std::forward<F>(fn));
 		};
 
-		auto& bloom_scale = scene.request_independent_react_node(react_flow::make_listener(
+		auto& bloom_scale = react_flow::attach(scene, react_flow::make_listener(
 			[=, &p = pass_bloom.data, &scene](float val){
 				post_task(scene, [&, val]{
 					p.set_scale(val);
 				});
 			}));
-		auto& bloom_src_recv = scene.request_independent_react_node(react_flow::make_listener(
+		auto& bloom_src_recv = react_flow::attach(scene, react_flow::make_listener(
 			[=, &p = pass_bloom.data, &scene](float val){
 				post_task(scene, [&, val]{
 					p.set_strength_src(val);
 				});
 			}));
-		auto& bloom_dst_recv = scene.request_independent_react_node(react_flow::make_listener(
+		auto& bloom_dst_recv = react_flow::attach(scene, react_flow::make_listener(
 			[=, &p = pass_bloom.data, &scene](float val){
 				post_task(scene, [&, val]{
 					p.set_strength_dst(val);
 				});
 
 			}));
-		auto& bloom_mix_recv = scene.request_independent_react_node(react_flow::make_listener(
+		auto& bloom_mix_recv = react_flow::attach(scene, react_flow::make_listener(
 			[=, &p = pass_bloom.data, &scene](float val){
 				post_task(scene, [&, val]{
 					p.set_mix_factor(val);
 				});
 			}));
 
-		auto& highlight_thres_recv = scene.request_independent_react_node(react_flow::make_listener(
+		auto& highlight_thres_recv = react_flow::attach(scene, react_flow::make_listener(
 			[=, &p = pass_filter_high_light.data, &scene](float val){
 				post_task(scene, [&, val]{
 					p.set_ubo_value(&high_light_filter_args::threshold, val);
 				});
 			}));
-		auto& highlight_smooth_recv = scene.request_independent_react_node(react_flow::make_listener(
+		auto& highlight_smooth_recv = react_flow::attach(scene, react_flow::make_listener(
 			[=, &p = pass_filter_high_light.data, &scene](float val){
 				post_task(scene, [&, val]{
 					p.set_ubo_value(&high_light_filter_args::smoothness, val);
 				});
 			}));
 
-		auto& tonemap_contrast = scene.request_independent_react_node(react_flow::make_listener(
+		auto& tonemap_contrast = react_flow::attach(scene, react_flow::make_listener(
 			[=, &p = pass_present.data, &scene](float val){
 				post_task(scene, [&, val]{
 					p.set_ubo_value(&compositor::fullscreen_present_params::contrast, val);
 				});
 			}));
-		auto& tonemap_exposure = scene.request_independent_react_node(react_flow::make_listener(
+		auto& tonemap_exposure = react_flow::attach(scene, react_flow::make_listener(
 			[=, &p = pass_present.data, &scene](float val){
 				post_task(scene, [&, val]{
 					p.set_ubo_value(&compositor::fullscreen_present_params::exposure, val);
 				});
 			}));
-		auto& tonemap_saturation = scene.request_independent_react_node(react_flow::make_listener(
+		auto& tonemap_saturation = react_flow::attach(scene, react_flow::make_listener(
 			[=, &p = pass_present.data, &scene](float val){
 				post_task(scene, [&, val]{
 					p.set_ubo_value(&compositor::fullscreen_present_params::saturation, val);
 				});
 			}));
-		auto& tonemap_gamma = scene.request_independent_react_node(react_flow::make_listener(
+		auto& tonemap_gamma = react_flow::attach(scene, react_flow::make_listener(
 			[=, &p = pass_present.data, &scene](float val){
 				post_task(scene, [&, val]{
 					p.set_ubo_value(&compositor::fullscreen_present_params::gamma, val);
@@ -745,11 +776,11 @@ void prepare(
 #pragma endregion
 
 	log::info({"GUI"}, "async scene setup");
-	gui::example::main_loop_type main_loop{std::move(renderer), ctx, {
+	gui::cfg::builtin::main_loop_type main_loop{std::move(renderer), ctx, {
 			.init_fn = init_fn,
-			.main_loop_fn = gui::example::main_loop_fn,
-			.exit_fn = [](gui::example::main_loop_type& loop){
-				gui::example::clear_main_ui();
+			.main_loop_fn = gui::cfg::builtin::main_loop_fn,
+			.exit_fn = [](gui::cfg::builtin::main_loop_type& loop){
+				gui::cfg::builtin::clear_main_ui();
 			}
 	}};
 
@@ -772,6 +803,11 @@ void prepare(
 	game_renderer.start();
 	game_trace("prepare: game renderer started");
 
+	vk::command_pool post_process_command_pool{
+		ctx.get_device(),
+		ctx.graphic_family(),
+		VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+	};
 	std::vector<vk::command_buffer> post_process_cmds{};
 	auto rebuild_post_process_commands = [&](
 		backend::vulkan::context& context,
@@ -791,11 +827,12 @@ void prepare(
 			post_process_cmds.clear();
 			post_process_cmds.reserve(frame_count);
 			for(std::uint32_t frame_slot = 0; frame_slot < frame_count; ++frame_slot){
-				post_process_cmds.push_back(context.get_graphic_command_pool().obtain());
+				post_process_cmds.push_back(post_process_command_pool.obtain());
 			}
 		}
 
 		for(std::uint32_t frame_slot = 0; frame_slot < frame_count; ++frame_slot){
+			post_process_cmds[frame_slot].reset();
 			vk::scoped_recorder recorder{
 				post_process_cmds[frame_slot],
 				VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
@@ -847,7 +884,7 @@ void prepare(
 
 	main_loop.join();
 
-	gui::example::dispose_generated_shapes();
+	gui::cfg::builtin::dispose_generated_shapes();
 	gui::global::terminate_assets_manager();
 	gui::global::terminate();
 
@@ -879,7 +916,7 @@ int game_main(int argc, char** argv){
 		mo_yanxi::log::add_file_sink(profile_session->output_dir() / "game.log");
 		mo_yanxi::log::set_min_level(mo_yanxi::log::parse_level(profile_session->config().run.log_level));
 	}
-	game_configure_runtime_working_directory();
+	game_configure_runtime_working_directory(argc > 0 ? argv[0] : nullptr);
 	game_trace(std::format("main: cwd {}", std::filesystem::current_path().string()));
 
 #ifndef NDEBUG

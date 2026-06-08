@@ -31,7 +31,7 @@ import mo_yanxi.gui.elem.progress_bar;
 
 import mo_yanxi.gui.elem.image_frame;
 import mo_yanxi.gui.elem.image_frame;
-import mo_yanxi.gui.elem.drag_split;
+import mo_yanxi.gui.elem.split_pane;
 import mo_yanxi.gui.elem.label;
 import mo_yanxi.gui.elem.text_edit;
 import mo_yanxi.gui.elem.viewport;
@@ -50,7 +50,7 @@ import mo_yanxi.graphic.msdf;
 import align;
 
 import mo_yanxi.typesetting;
-import mo_yanxi.graphic.draw.instruction.recorder;
+import mo_yanxi.graphic.g2d.recorder;
 
 
 import mo_yanxi.gui.compound.color_picker;
@@ -60,7 +60,7 @@ import mo_yanxi.gui.compound.data_table;
 import mo_yanxi.gui.compound.click_collapser;
 import mo_yanxi.gui.compound.numeric_input_area;
 
-import mo_yanxi.gui.default_config.round_styles;
+import mo_yanxi.gui.cfg.builtin.round_styles;
 import mo_yanxi.gui.style.progress_bars;
 import mo_yanxi.gui.style.palette;
 
@@ -73,11 +73,11 @@ import mo_yanxi.backend.vulkan.context;
 import mo_yanxi.graphic.trail;
 import mo_yanxi.math.rand;
 
-import mo_yanxi.gui.examples.default_config.constants;
-import mo_yanxi.gui.default_config.scene;
+import mo_yanxi.gui.cfg.builtin.constants;
+import mo_yanxi.gui.cfg.builtin.scene;
 
 
-namespace mo_yanxi::gui::example{
+namespace mo_yanxi::gui::cfg::builtin{
 using namespace gui;
 
 struct test_entry{
@@ -112,23 +112,33 @@ struct csv_file_reader : head_body{
 		void on_update(react_flow::data_carrier<std::span<const std::filesystem::path>>& data) override{
 			auto sp = data.get();
 			if(sp.empty()) return;
-			auto& path = sp.front();
+			const std::filesystem::path selected_path = sp.front();
 
 			carrier->get_scene().close_overlay(std::exchange(overlay, nullptr));
 
-			util::post_elem_async_task(*carrier, [&](csv_file_reader& r){
-				return elem_async_yield_task{
-						r, [&](csv_file_reader& r, scene& s){
-							return elem_ptr{
-									s, &r, [p = path](cpd::data_table& table){
+			util::post_elem_async_task(*carrier, [selected_path](csv_file_reader&){
+				return elem_async_yield_task<csv_file_reader>{
+						[selected_path](elem_async_task_context& context, scene& s){
+							context.report_progress(0u, 1u);
+							if(context.stop_requested()){
+								return elem_ptr{};
+							}
+							auto table = elem_ptr{
+									s, nullptr, [p = selected_path](cpd::data_table& table){
 										table.set_style();
 										table.get_item() = cpd::data_table_desc::from_csv(p, '|');
 										table.get_item().try_update_glyph_layouts();
 										table.notify_isolated_layout_changed();
 									}
 								};
+							context.report_progress(1u, 1u);
+							return table;
 						},
 						[](csv_file_reader& r, scene& s, elem_ptr&& ptr){
+							(void)s;
+							if(ptr == nullptr){
+								return;
+							}
 							util::sync_elem_tree(*ptr, r.get_scene());
 							r.set_body_elem(std::move(ptr));
 						}
@@ -141,7 +151,7 @@ struct csv_file_reader : head_body{
 				prog.progress.set_speed(.0001f);
 				prog.draw_config.color = {graphic::colors::white, graphic::colors::white};
 
-				prog.set_self_border(gui::border{}.set(32));
+				prog.set_self_border(gui::border_t{}.set(32));
 				prog.set_style(style::make_ring_progress_style(32));
 				prog.set_progress_state(progress_state::rough);
 			});
@@ -183,14 +193,18 @@ struct csv_file_reader : head_body{
 
 #pragma endregion
 
-ui_outputs build_main_ui(backend::vulkan::context& ctx, renderer_frontend renderer, graphic::image_atlas& image_atlas){
+ui_outputs build_main_ui(
+	backend::vulkan::context& ctx,
+	renderer_frontend renderer,
+	graphic::image_atlas& image_atlas,
+	window_thread_dispatcher& window_dispatcher){
 	game::ui::configure_collision_shape_editor_reference_images(image_atlas);
 
 	auto& ui_root = global::manager;
 	auto& res = ui_root.add_scene_resources("main");
-	auto style_pal_prov = gui::example::make_styles(res);
+	auto style_pal_prov = gui::cfg::builtin::make_styles(res);
 
-	const auto scene_add_rst = ui_root.add_scene<gui::example::example_scene, loose_group>("main", res, true, std::move(renderer));
+	const auto scene_add_rst = ui_root.add_scene<gui::cfg::builtin::example_scene, loose_group>("main", res, true, std::move(renderer));
 
 	// scene_add_rst.scene.resize(math::rect_ortho{tags::from_extent, {}, ctx.get_extent().width, ctx.get_extent().height}.as<float>());
 	auto& scene = scene_add_rst.scene;
@@ -200,7 +214,7 @@ ui_outputs build_main_ui(backend::vulkan::context& ctx, renderer_frontend render
 	scene.enable_elem_async_task_post(true);
 	scene.drop_and_reset_communicate_async_task_queue_size(1);
 
-	gui::example::set_cursors(scene);
+	gui::cfg::builtin::set_cursors(scene);
 
 	scene.pass_config = {
 			{
@@ -220,7 +234,9 @@ ui_outputs build_main_ui(backend::vulkan::context& ctx, renderer_frontend render
 			fx::blit_pipeline_config{}
 		};
 
-	scene.resources().set_native_communicator<backend::glfw::communicator>(ctx.window().get_handle());
+	scene.resources().set_native_communicator<backend::glfw::communicator>(
+		ctx.window().get_handle(),
+		window_dispatcher);
 	scene.get_communicator()->set_native_cursor_visibility(false);
 
 	auto e = scene.create<scaling_stack>();
@@ -323,8 +339,8 @@ ui_outputs build_main_ui(backend::vulkan::context& ctx, renderer_frontend render
 								});
 								label.cell().set_pending();
 
-								auto& ln = label->request_react_node<direct_label_text_prov>();
-								auto& trans = label->request_embedded_react_node(react_flow::make_transformer(
+								auto& ln = react_flow::attach(label.elem(), std::in_place_type<direct_label_text_prov>, label.elem());
+								auto& trans = react_flow::attach(label.elem(), react_flow::make_transformer(
 									[](std::u32string_view sv){
 										return typesetting::tokenized_text{sv};
 									}));
@@ -394,7 +410,7 @@ ui_outputs build_main_ui(backend::vulkan::context& ctx, renderer_frontend render
 							auto& trans = hdl->add_relay(react_flow::make_transformer([](float val){
 								return math::lerp(0.f, 2.f, val);
 							}));
-							auto& formatter = hdl->request_embedded_react_node(react_flow::make_transformer(
+							auto& formatter = react_flow::attach(hdl.elem(), react_flow::make_transformer(
 								[](float val){
 									return std::format("{:.2f}", val);
 								}));
@@ -651,7 +667,7 @@ ui_outputs build_main_ui(backend::vulkan::context& ctx, renderer_frontend render
 								receiver->set_style(family_variant);
 								receiver->interactivity = interactivity_flag::enabled;
 
-								auto& listener = receiver->request_embedded_react_node(react_flow::make_listener(
+								auto& listener = react_flow::attach(receiver.elem(), react_flow::make_listener(
 									[&e = receiver.elem()](bool i){
 										e.set_toggled(i);
 										if(i){
@@ -874,13 +890,13 @@ Edge Cases:
 				test_entry{
 					"color picker", [&](sequence& table){
 						table.set_style();
-						table.set_self_border(gui::border{}.set(16));
+						table.set_self_border(gui::border_t{}.set(16));
 						table.set_layout_spec(
 							layout::directional_layout_specifier::fixed(layout::layout_policy::vert_major));
 						table.template_cell.set_pad({16, 16});
 						table.set_expand_policy(layout::expand_policy::passive);
 						struct picker : cpd::precise_color_picker{
-							std::add_pointer_t<gui::example::make_style_result::node_type> prov;
+							std::add_pointer_t<gui::cfg::builtin::make_style_result::node_type> prov;
 							using precise_color_picker::precise_color_picker;
 
 						protected:
@@ -925,7 +941,7 @@ Edge Cases:
 		menu_hdl->push_back(
 			elem_ptr{
 				menu_hdl->get_scene(), &menu_hdl.elem(), [&](label& label){
-					label.set_self_border(border{}.set_vert(6));
+					label.set_self_border(border_t{}.set_vert(6));
 					label.set_style(style::family_variant::base_only);
 					label.set_fit_type(label_fit_type::scl);
 					label.set_text(std::format("[{}]-{}", idx, creator.name));

@@ -1288,3 +1288,54 @@ private:
 			collision_shape_query_transform::make(parent_transform)));
 }
 }
+
+export namespace mo_yanxi::game::collision{
+using circle_payload = physics::circle_shape;
+using capsule_payload = physics::capsule_shape;
+using box_payload = physics::box_shape;
+using convex_polygon_payload = physics::convex_polygon_storage;
+using payload = physics::collision_shape_record_payload;
+using record_part = physics::collision_shape_record_part;
+using query_transform = physics::collision_shape_query_transform;
+using record_query = physics::collision_shape_record_query;
+using shape = physics::collision_shape;
+using record = physics::collision_shape_record;
+
+[[nodiscard]] constexpr shape make_circle(
+	const float radius,
+	const math::trans2 local_transform = {}){
+	return physics::make_circle_collision_shape(radius, local_transform);
+}
+
+[[nodiscard]] constexpr shape make_capsule(
+	const math::vec2 begin,
+	const math::vec2 end,
+	const float radius,
+	const math::trans2 local_transform = {}){
+	return physics::make_capsule_collision_shape(begin, end, radius, local_transform);
+}
+
+[[nodiscard]] constexpr shape make_box(
+	const math::vec2 half_extent,
+	const math::trans2 local_transform = {}){
+	return physics::make_box_collision_shape(half_extent, local_transform);
+}
+
+template<physics::polygon_vertex_range Vertices>
+[[nodiscard]] constexpr shape make_convex_polygon(
+	Vertices&& vertices,
+	const math::trans2 local_transform = {}){
+	return physics::make_convex_polygon_collision_shape(
+		std::forward<Vertices>(vertices),
+		local_transform);
+}
+
+template<physics::polygon_vertex_range Vertices>
+[[nodiscard]] constexpr shape make_polygon(
+	Vertices&& vertices,
+	const math::trans2 local_transform = {}){
+	return physics::make_polygon_collision_shape(
+		std::forward<Vertices>(vertices),
+		local_transform);
+}
+}

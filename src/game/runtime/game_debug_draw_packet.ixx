@@ -3,7 +3,7 @@ export module mo_yanxi.game.runtime.game_debug_draw_packet;
 export import mo_yanxi.game.physics.shape;
 export import mo_yanxi.game.runtime.draw.collision_shape_style;
 
-import mo_yanxi.graphic.draw.instruction;
+import mo_yanxi.graphic.g2d;
 import std;
 
 namespace mo_yanxi::game{
@@ -245,7 +245,7 @@ export
 [[nodiscard]] std::uint32_t make_game_debug_draw_circle_segment_count(const float radius) noexcept{
 	return std::max<std::uint32_t>(
 		12u,
-		graphic::draw::instruction::get_circle_vertices(std::max(radius, 1.f)));
+		graphic::g2d::get_circle_vertices(std::max(radius, 1.f)));
 }
 
 export

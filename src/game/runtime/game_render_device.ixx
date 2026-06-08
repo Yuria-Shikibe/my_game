@@ -12,11 +12,11 @@ import mo_yanxi.backend.vulkan.attachment_manager;
 import mo_yanxi.backend.vulkan.pipeline_manager;
 import mo_yanxi.backend.vulkan.renderer.components;
 import mo_yanxi.game.profile.runtime;
-import mo_yanxi.graphic.draw.instruction;
-import mo_yanxi.graphic.draw.instruction.batch.backend.vulkan;
+import mo_yanxi.graphic.g2d;
+import mo_yanxi.graphic.g2d.batch.backend.vulkan;
 import mo_yanxi.graphic.image_view_registry;
 import mo_yanxi.graphic_state_context;
-import mo_yanxi.gui.examples.default_config.constants;
+import mo_yanxi.gui.cfg.builtin.constants;
 import mo_yanxi.gui.fx.config;
 import mo_yanxi.gui.renderer.abi;
 import mo_yanxi.gui.renderer.frontend;
@@ -32,7 +32,7 @@ import mo_yanxi.vk.util;
 import std;
 
 namespace mo_yanxi::game{
-namespace instr = graphic::draw::instruction;
+namespace instr = graphic::g2d;
 
 template <typename T>
 constexpr T game_renderer_bit_mask(const unsigned count) noexcept{
@@ -84,10 +84,10 @@ public:
 
 private:
 	struct game_renderer_tables{
-		graphic::draw::data_layout_table<> vertex{
+		graphic::g2d::data_layout_table<> vertex{
 			std::in_place_type<gui::gui_reserved_user_data_tuple>
 		};
-		graphic::draw::data_layout_table<> non_vertex{
+		graphic::g2d::data_layout_table<> non_vertex{
 			std::in_place_type<std::tuple<gui::fx::ui_state, gui::fx::slide_line_config>>
 		};
 	};
@@ -111,7 +111,7 @@ private:
 		};
 
 	private:
-		graphic::draw::record_context<> cache_descriptor_context_{};
+		graphic::g2d::record_context<> cache_descriptor_context_{};
 		vk::sync::sync_barrier_batch cache_barrier_gen_{};
 		vk::dynamic_rendering cache_rendering_config_{};
 		std::vector<std::uint8_t> cache_attachment_enter_mark_{};
@@ -324,8 +324,8 @@ private:
 	std::unique_ptr<graphic::image_view_registry> image_view_registry_{std::make_unique<graphic::image_view_registry>()};
 	graphic::sampler_descriptor_index default_sampler_index_{graphic::auto_sampler_index};
 
-	graphic::draw::instruction::draw_list_context batch_host_{};
-	graphic::draw::instruction::batch_vulkan_executor batch_device_{};
+	graphic::g2d::draw_list_context batch_host_{};
+	graphic::g2d::batch_vulkan_executor batch_device_{};
 	backend::vulkan::attachment_manager attachment_manager_{};
 	backend::vulkan::graphic_pipeline_manager draw_pipeline_manager_{};
 	backend::vulkan::renderer_blit_resources blit_resources_{};
@@ -342,7 +342,7 @@ private:
 		return {};
 	}
 
-	[[nodiscard]] static graphic::draw::instruction::hardware_limit_config query_hardware_limits(
+	[[nodiscard]] static graphic::g2d::hardware_limit_config query_hardware_limits(
 		const vk::allocator_usage& allocator){
 		VkPhysicalDeviceMeshShaderPropertiesEXT mesh_properties{
 			VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT
@@ -536,7 +536,7 @@ public:
 		});
 		this->update_state(viewport);
 		this->update_state(gui::fx::pipeline_config{.pipeline_index = 0});
-		this->update_state(gui::fx::push_constant{gui::example::gpip::default_draw_constants{}});
+		this->update_state(gui::fx::push_constant{gui::cfg::builtin::gpip::default_draw_constants{}});
 		this->update_state(gui::fx::blend::pma::standard);
 		this->update_state(gui::fx::make_blend_write_mask(true), 0);
 	}

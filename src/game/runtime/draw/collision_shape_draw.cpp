@@ -1,12 +1,12 @@
 module mo_yanxi.game.runtime.draw.collision_shape;
 
 import mo_yanxi.game.runtime.game_renderer;
-import mo_yanxi.graphic.draw.instruction;
+import mo_yanxi.graphic.g2d;
 import mo_yanxi.gui.fx;
 import std;
 
 namespace mo_yanxi::game::draw{
-namespace instr = graphic::draw::instruction;
+namespace instr = graphic::g2d;
 
 constexpr float collision_draw_epsilon = 1.0e-5f;
 
@@ -43,7 +43,7 @@ constexpr float collision_draw_epsilon = 1.0e-5f;
 [[nodiscard]] std::uint32_t circle_segment_count(const float radius) noexcept{
 	return std::max<std::uint32_t>(
 		12u,
-		graphic::draw::instruction::get_circle_vertices(std::max(radius, 1.f)));
+		graphic::g2d::get_circle_vertices(std::max(radius, 1.f)));
 }
 
 void push_line(
@@ -62,6 +62,19 @@ void push_line(
 		.color = make_color_section(style),
 		.stroke = sane_stroke(style)
 	});
+}
+
+void push_open_line(
+	gui::renderer_frontend& renderer,
+	const std::span<const math::vec2> vertices,
+	const collision_shape_draw_style& style){
+	if(vertices.size() < 2){
+		return;
+	}
+
+	for(std::size_t index = 1u; index != vertices.size(); ++index){
+		draw::push_line(renderer, vertices[index - 1u], vertices[index], style);
+	}
 }
 
 void push_closed_line(
@@ -108,6 +121,23 @@ void push_filled_polygon(
 			.c2 = style.color
 		});
 	}
+}
+
+void fill_polygon(
+	gui::renderer_frontend& renderer,
+	const std::span<const math::vec2> vertices,
+	const math::trans2 transform,
+	const collision_shape_draw_style& style){
+	if(vertices.size() < 3){
+		return;
+	}
+
+	std::vector<math::vec2> transformed{};
+	transformed.reserve(vertices.size());
+	for(const math::vec2 vertex : vertices){
+		transformed.push_back(vertex >> transform);
+	}
+	draw::push_filled_polygon(renderer, transformed, style);
 }
 
 void draw_shape(

@@ -1,12 +1,12 @@
 module mo_yanxi.gui.game_examples.loop_exec;
 
-import mo_yanxi.gui.examples.default_config.constants;
+import mo_yanxi.gui.cfg.builtin.constants;
 import mo_yanxi.gui.global;
 import std;
 
 import mo_yanxi.gui.fx.instruction_extension;
 
-void mo_yanxi::gui::example::main_loop_fn(struct main_loop<main_loop_payload>& main_loop){
+void mo_yanxi::gui::cfg::builtin::main_loop_fn(struct main_loop<main_loop_payload>& main_loop){
 	auto& current_focus = main_loop.get_scene();
 	global::consume_current_input(current_focus, [&](input_handle::input_event_variant e){
 		main_loop.unhandled_events.push(e);

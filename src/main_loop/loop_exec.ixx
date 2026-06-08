@@ -5,10 +5,10 @@
 export module mo_yanxi.gui.game_examples.loop_exec;
 
 export import mo_yanxi.game.instance;
-import mo_yanxi.gui.default_config.main_loop;
+import mo_yanxi.gui.cfg.builtin.main_loop;
 import std;
 
-namespace mo_yanxi::gui::example{
+namespace mo_yanxi::gui::cfg::builtin{
 export
 class game_instance_holder{
 private:

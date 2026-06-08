@@ -17,6 +17,31 @@ void push_line(
 	const collision_shape_draw_style& style);
 
 export
+void push_open_line(
+	gui::renderer_frontend& renderer,
+	std::span<const math::vec2> vertices,
+	const collision_shape_draw_style& style);
+
+export
+void push_closed_line(
+	gui::renderer_frontend& renderer,
+	std::span<const math::vec2> vertices,
+	const collision_shape_draw_style& style);
+
+export
+void push_filled_polygon(
+	gui::renderer_frontend& renderer,
+	std::span<const math::vec2> vertices,
+	const collision_shape_draw_style& style);
+
+export
+void fill_polygon(
+	gui::renderer_frontend& renderer,
+	std::span<const math::vec2> vertices,
+	math::trans2 transform,
+	const collision_shape_draw_style& style);
+
+export
 void draw_shape(
 	gui::renderer_frontend& renderer,
 	const physics::circle_shape& shape,

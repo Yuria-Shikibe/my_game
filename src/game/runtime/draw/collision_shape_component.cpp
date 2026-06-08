@@ -1,6 +1,6 @@
 module mo_yanxi.game.runtime.draw.collision_shape_gui_draw;
 
-import mo_yanxi.gui.examples.default_config.constants;
+import mo_yanxi.gui.cfg.builtin.constants;
 import mo_yanxi.gui.fx.instruction_extension;
 import std;
 
@@ -20,10 +20,10 @@ void collision_shape_draw_system::draw(
 	renderer.top_viewport().push_local_transform(camera_transform);
 	renderer.notify_viewport_changed();
 	renderer.update_state(gui::fx::pipeline_config{
-		.pipeline_index = gui::example::gpip::idx::def
+		.pipeline_index = gui::cfg::builtin::gpip::idx::def
 	});
 	renderer.update_state(gui::fx::push_constant{
-		gui::example::gpip::default_draw_constants{}
+		gui::cfg::builtin::gpip::default_draw_constants{}
 	});
 
 	const auto viewport = camera.get_viewport();
@@ -51,10 +51,10 @@ void collision_shape_draw_system::draw(
 	renderer.top_viewport().pop_local_transform();
 	renderer.notify_viewport_changed();
 	renderer.update_state(gui::fx::pipeline_config{
-		.pipeline_index = gui::example::gpip::idx::def
+		.pipeline_index = gui::cfg::builtin::gpip::idx::def
 	});
 	renderer.update_state(gui::fx::push_constant{
-		gui::example::gpip::default_draw_constants{}
+		gui::cfg::builtin::gpip::default_draw_constants{}
 	});
 }
 }

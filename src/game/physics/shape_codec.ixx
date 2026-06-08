@@ -275,6 +275,16 @@ struct codec<game::physics::collision_shape_editor_mirror_modifier>
 };
 
 template <>
+struct codec<game::physics::collision_shape_editor_polygon_edge>
+	: srl::record_codec<
+		game::physics::collision_shape_editor_polygon_edge,
+		codec<game::physics::collision_shape_editor_polygon_edge>>{
+	using field_spec = std::tuple<
+		srl::field<1u, &game::physics::collision_shape_editor_polygon_edge::first>,
+		srl::field<2u, &game::physics::collision_shape_editor_polygon_edge::second>>;
+};
+
+template <>
 struct codec<game::physics::collision_shape_editor_part>
 	: srl::record_codec<
 		game::physics::collision_shape_editor_part,
@@ -286,7 +296,10 @@ struct codec<game::physics::collision_shape_editor_part>
 		srl::field<4u, &game::physics::collision_shape_editor_part::capsule>,
 		srl::field<5u, &game::physics::collision_shape_editor_part::box>,
 		srl::field<6u, &game::physics::collision_shape_editor_part::convex_polygon>,
-		srl::field<7u, &game::physics::collision_shape_editor_part::mirror>>;
+		srl::field<7u, &game::physics::collision_shape_editor_part::mirror>,
+		srl::field<8u, &game::physics::collision_shape_editor_part::polygon_edges>,
+		srl::field<9u, &game::physics::collision_shape_editor_part::polygon_edges_explicit>,
+		srl::field<10u, &game::physics::collision_shape_editor_part::closed>>;
 };
 
 template <>
@@ -312,6 +325,7 @@ struct codec<game::physics::collision_shape_editor_document>
 	using field_spec = std::tuple<
 		srl::field<1u, &game::physics::collision_shape_editor_document::parts>,
 		srl::field<3u, &game::physics::collision_shape_editor_document::total_transform>,
-		srl::field<4u, &game::physics::collision_shape_editor_document::reference_image>>;
+		srl::field<4u, &game::physics::collision_shape_editor_document::reference_image>,
+		srl::field<5u, &game::physics::collision_shape_editor_document::polygon_export_mode>>;
 };
 }
