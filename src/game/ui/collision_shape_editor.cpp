@@ -2199,19 +2199,21 @@ public:
 
 	bool update(float delta_in_ticks) override;
 
-	gui::events::op_afterwards on_click(
-		gui::events::click event,
-		std::span<gui::elem* const> aboves) override;
+	void on_pointer_button(
+		gui::events::event_context& ctx,
+		const gui::events::pointer_button_event& event) override;
 
-	gui::events::op_afterwards on_drag(gui::events::drag event) override;
+	void on_pointer_drag(
+		gui::events::event_context& ctx,
+		const gui::events::pointer_drag_event& event) override;
 
-	gui::events::op_afterwards on_cursor_moved(gui::events::cursor_move event) override;
+	void on_cursor_moved(const gui::events::pointer_move_event& event) override;
 
-	gui::events::op_afterwards on_key_input(input_handle::key_set key) override;
+	void on_key(gui::events::event_context& ctx, const gui::events::key_event& event) override;
 
-	gui::events::op_afterwards on_unicode_input(char32_t value) override;
+	void on_text(gui::events::event_context& ctx, const gui::events::text_event& event) override;
 
-	gui::events::op_afterwards on_esc() override;
+	gui::events::dispatch_result on_esc() override;
 
 	void record_draw_layer(gui::draw_recorder& call_stack_builder) const override;
 
@@ -6226,24 +6228,31 @@ bool collision_shape_editor_viewport::update(const float delta_in_ticks){
 	return true;
 }
 
-gui::events::op_afterwards collision_shape_editor_viewport::on_click(
-	const gui::events::click event,
-	std::span<gui::elem* const> aboves){
-	this->refresh_cursor_cache_from_local(event.pos);
+void collision_shape_editor_viewport::on_pointer_button(
+	gui::events::event_context& ctx,
+	const gui::events::pointer_button_event& event){
+	if(!ctx.is_target_or_bubble_phase()){
+		return;
+	}
+
+	this->refresh_cursor_cache_from_local(event.local_pos);
+	const auto aboves = ctx.descendants_to_target();
 	const bool rmb_press = event.key.as_mouse() == input_handle::mouse::RMB
 		&& event.key.action == input_handle::act::press
-		&& event.within_elem(*this);
+		&& event.within_elem(ctx, *this);
 	if(add_menu_overlay_ != nullptr
 		&& event.key.action == input_handle::act::press
 		&& !editor_detail::contains_inbound_elem(*add_menu_overlay_, aboves)){
 		this->close_add_menu();
-		return gui::events::op_afterwards::intercepted;
+		ctx.consume(*this);
+		return;
 	}
 	if(merge_menu_overlay_ != nullptr
 		&& event.key.action == input_handle::act::press
 		&& !editor_detail::contains_inbound_elem(*merge_menu_overlay_, aboves)){
 		this->close_merge_menu();
-		return gui::events::op_afterwards::intercepted;
+		ctx.consume(*this);
+		return;
 	}
 	if(context_menu_overlay_ != nullptr
 		&& event.key.action == input_handle::act::press
@@ -6252,7 +6261,8 @@ gui::events::op_afterwards collision_shape_editor_viewport::on_click(
 		if(rmb_press){
 			this->show_context_menu();
 		}
-		return gui::events::op_afterwards::intercepted;
+		ctx.consume(*this);
+		return;
 	}
 	if(reference_image_file_overlay_ != nullptr
 		&& event.key.action == input_handle::act::press
@@ -6260,17 +6270,20 @@ gui::events::op_afterwards collision_shape_editor_viewport::on_click(
 			*reference_image_file_overlay_,
 			aboves)){
 		this->close_reference_image_file_selector();
-		return gui::events::op_afterwards::intercepted;
+		ctx.consume(*this);
+		return;
 	}
 	if(document_file_overlay_ != nullptr
 		&& event.key.action == input_handle::act::press
 		&& !editor_detail::contains_inbound_elem(*document_file_overlay_, aboves)){
 		this->close_document_file_selector();
-		return gui::events::op_afterwards::intercepted;
+		ctx.consume(*this);
+		return;
 	}
 	if(rmb_press){
 		this->show_context_menu();
-		return gui::events::op_afterwards::intercepted;
+		ctx.consume(*this);
+		return;
 	}
 	if(event.key.as_mouse() == input_handle::mouse::LMB
 		&& event.key.action == input_handle::act::release
@@ -6284,27 +6297,31 @@ gui::events::op_afterwards collision_shape_editor_viewport::on_click(
 			input_handle::matched(event.key.mode_bits, input_handle::mode::shift),
 			input_handle::matched(event.key.mode_bits, input_handle::mode::ctrl));
 		state.cancel_box_selection();
-		return gui::events::op_afterwards::intercepted;
+		ctx.consume(*this);
+		return;
 	}
 
-	if(event.key.as_mouse() == input_handle::mouse::LMB && event.within_elem(*this)){
+	if(event.key.as_mouse() == input_handle::mouse::LMB && event.within_elem(ctx, *this)){
 		const math::vec2 world_pos = this->cursor_world_pos();
 		if(state.knife_cut() != nullptr){
 			if(event.key.action == input_handle::act::press){
 				state.add_knife_cut_point(world_pos);
 			}
-			return gui::events::op_afterwards::intercepted;
+			ctx.consume(*this);
+			return;
 		}
 		if(state.operation_active()){
 			if(event.key.action == input_handle::act::release){
 				static_cast<void>(state.preview_operation(world_pos));
 				static_cast<void>(state.commit_operation());
 			}
-			return gui::events::op_afterwards::intercepted;
+			ctx.consume(*this);
+			return;
 		}
 		if(event.key.action == input_handle::act::press){
 			state.begin_box_selection(world_pos);
-			return gui::events::op_afterwards::intercepted;
+			ctx.consume(*this);
+			return;
 		}
 		if(event.key.action == input_handle::act::release && state.box_selection() != nullptr){
 			auto* box_selection = state.box_selection();
@@ -6315,31 +6332,45 @@ gui::events::op_afterwards collision_shape_editor_viewport::on_click(
 				input_handle::matched(event.key.mode_bits, input_handle::mode::shift),
 				input_handle::matched(event.key.mode_bits, input_handle::mode::ctrl));
 			state.cancel_box_selection();
-			return gui::events::op_afterwards::intercepted;
+			ctx.consume(*this);
+			return;
 		}
 	}
-	return gui::viewport::on_click(event, aboves);
+	gui::viewport::on_pointer_button(ctx, event);
 }
 
-gui::events::op_afterwards collision_shape_editor_viewport::on_drag(const gui::events::drag event){
-	this->refresh_cursor_cache_from_local(event.dst);
+void collision_shape_editor_viewport::on_pointer_drag(
+	gui::events::event_context& ctx,
+	const gui::events::pointer_drag_event& event){
+	if(!ctx.is_target_or_bubble_phase()){
+		return;
+	}
+
+	this->refresh_cursor_cache_from_local(event.local_dst);
 	if(event.key.as_mouse() == input_handle::mouse::LMB && state.box_selection() != nullptr && !state.operation_active()){
 		state.box_selection()->update(this->cursor_world_pos());
-		return gui::events::op_afterwards::intercepted;
+		ctx.consume(*this);
+		return;
 	}
 	if(event.key.as_mouse() == input_handle::mouse::LMB && state.operation_active()){
 		static_cast<void>(state.preview_operation(this->cursor_world_pos()));
-		return gui::events::op_afterwards::intercepted;
+		ctx.consume(*this);
+		return;
 	}
-	return gui::viewport::on_drag(event);
+	gui::viewport::on_pointer_drag(ctx, event);
 }
 
-gui::events::op_afterwards collision_shape_editor_viewport::on_cursor_moved(const gui::events::cursor_move event){
-	this->refresh_cursor_cache_from_local(event.dst);
-	return gui::viewport::on_cursor_moved(event);
+void collision_shape_editor_viewport::on_cursor_moved(const gui::events::pointer_move_event& event){
+	this->refresh_cursor_cache_from_local(event.local_dst);
+	gui::elem::on_cursor_moved(event);
 }
 
-gui::events::op_afterwards collision_shape_editor_viewport::on_key_input(const input_handle::key_set key){
+void collision_shape_editor_viewport::on_key(gui::events::event_context& ctx, const gui::events::key_event& event){
+	if(!ctx.is_target_or_bubble_phase()){
+		return;
+	}
+
+	const input_handle::key_set key = event.key;
 	const math::vec2 cursor = this->cursor_world_pos();
 
 	if(state.knife_cut() != nullptr){
@@ -6347,13 +6378,15 @@ gui::events::op_afterwards collision_shape_editor_viewport::on_key_input(const i
 		case input_handle::key::enter:
 			if(key.action == input_handle::act::press){
 				state.commit_knife_cut();
-				return gui::events::op_afterwards::intercepted;
+				ctx.consume(*this);
+				return;
 			}
 			break;
 		case input_handle::key::backspace:
 			if(key.action == input_handle::act::press || key.action == input_handle::act::repeat){
 				state.erase_knife_cut_point();
-				return gui::events::op_afterwards::intercepted;
+				ctx.consume(*this);
+				return;
 			}
 			break;
 		default:
@@ -6366,7 +6399,7 @@ gui::events::op_afterwards collision_shape_editor_viewport::on_key_input(const i
 		state.operation_active(),
 		state.mode);
 	if(!mapped_action){
-		return gui::events::op_afterwards::fall_through;
+		return;
 	}
 
 	const auto handled = [this, key, cursor](const editor_detail::editor_action action) -> bool{
@@ -6521,60 +6554,65 @@ gui::events::op_afterwards collision_shape_editor_viewport::on_key_input(const i
 	}(*mapped_action);
 
 	if(handled){
-		return gui::events::op_afterwards::intercepted;
+		ctx.consume(*this);
+		return;
 	}
-
-	return gui::events::op_afterwards::fall_through;
 }
 
-gui::events::op_afterwards collision_shape_editor_viewport::on_unicode_input(const char32_t value){
+void collision_shape_editor_viewport::on_text(gui::events::event_context& ctx, const gui::events::text_event& event){
+	if(!ctx.is_target_or_bubble_phase()){
+		return;
+	}
+
+	const char32_t value = event.value;
 	if(state.input_operation_character(value)){
 		static_cast<void>(state.preview_operation(this->cursor_world_pos()));
-		return gui::events::op_afterwards::intercepted;
+		ctx.consume(*this);
+		return;
 	}
 	if(state.box_selection() != nullptr){
 		state.cancel_box_selection();
-		return gui::events::op_afterwards::intercepted;
+		ctx.consume(*this);
+		return;
 	}
-	return gui::events::op_afterwards::fall_through;
 }
 
-gui::events::op_afterwards collision_shape_editor_viewport::on_esc(){
+gui::events::dispatch_result collision_shape_editor_viewport::on_esc(){
 	if(state.operation_active()){
 		if(!state.clear_operation_command()){
 			state.cancel_operation();
 		}else{
 			static_cast<void>(state.preview_operation(this->cursor_world_pos()));
 		}
-		return gui::events::op_afterwards::intercepted;
+		return gui::events::dispatch_result::handled;
 	}
 	if(state.knife_cut() != nullptr){
 		state.cancel_knife_cut();
-		return gui::events::op_afterwards::intercepted;
+		return gui::events::dispatch_result::handled;
 	}
 	if(add_menu_overlay_ != nullptr){
 		this->close_add_menu();
-		return gui::events::op_afterwards::intercepted;
+		return gui::events::dispatch_result::handled;
 	}
 	if(merge_menu_overlay_ != nullptr){
 		this->close_merge_menu();
-		return gui::events::op_afterwards::intercepted;
+		return gui::events::dispatch_result::handled;
 	}
 	if(context_menu_overlay_ != nullptr){
 		this->close_context_menu();
-		return gui::events::op_afterwards::intercepted;
+		return gui::events::dispatch_result::handled;
 	}
 	if(reference_image_file_overlay_ != nullptr){
 		this->close_reference_image_file_selector();
-		return gui::events::op_afterwards::intercepted;
+		return gui::events::dispatch_result::handled;
 	}
 	if(document_file_overlay_ != nullptr){
 		this->close_document_file_selector();
-		return gui::events::op_afterwards::intercepted;
+		return gui::events::dispatch_result::handled;
 	}
 	if(state.current_selected_part_index()){
 		state.clear_selection_for_current_mode();
-		return gui::events::op_afterwards::intercepted;
+		return gui::events::dispatch_result::handled;
 	}
 	return gui::viewport::on_esc();
 }

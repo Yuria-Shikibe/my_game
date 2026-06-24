@@ -12,6 +12,7 @@ import std;
 import mo_yanxi.binary_trace;
 
 import mo_yanxi.gui.infrastructure;
+import mo_yanxi.audio;
 import mo_yanxi.gui.elem.group;
 import mo_yanxi.gui.global;
 
@@ -116,34 +117,31 @@ struct csv_file_reader : head_body{
 
 			carrier->get_scene().close_overlay(std::exchange(overlay, nullptr));
 
-			util::post_elem_async_task(*carrier, [selected_path](csv_file_reader&){
-				return elem_async_yield_task<csv_file_reader>{
-						[selected_path](elem_async_task_context& context, scene& s){
-							context.report_progress(0u, 1u);
-							if(context.stop_requested()){
-								return elem_ptr{};
+			(void)gui::request_forked(
+				*carrier,
+				[selected_path](async_task_context& context, scene& s){
+					context.report_progress(0u, 1u);
+					if(context.stop_requested()){
+						return elem_ptr{};
+					}
+					auto table = elem_ptr{
+							s, nullptr, [p = selected_path](cpd::data_table& table){
+								table.set_style();
+								table.get_item() = cpd::data_table_desc::from_csv(p, '|');
+								table.get_item().try_update_glyph_layouts();
+								table.notify_isolated_layout_changed();
 							}
-							auto table = elem_ptr{
-									s, nullptr, [p = selected_path](cpd::data_table& table){
-										table.set_style();
-										table.get_item() = cpd::data_table_desc::from_csv(p, '|');
-										table.get_item().try_update_glyph_layouts();
-										table.notify_isolated_layout_changed();
-									}
-								};
-							context.report_progress(1u, 1u);
-							return table;
-						},
-						[](csv_file_reader& r, scene& s, elem_ptr&& ptr){
-							(void)s;
-							if(ptr == nullptr){
-								return;
-							}
-							util::sync_elem_tree(*ptr, r.get_scene());
-							r.set_body_elem(std::move(ptr));
-						}
-					};
-			});
+						};
+					context.report_progress(1u, 1u);
+					return table;
+				},
+				[](csv_file_reader& r, elem_ptr&& ptr){
+					if(ptr == nullptr){
+						return;
+					}
+					util::sync_elem_tree(*ptr, r.get_scene());
+					r.set_body_elem(std::move(ptr));
+				});
 
 			carrier->create_body([&](progress_bar& prog){
 				prog.set_style();
@@ -197,11 +195,15 @@ ui_outputs build_main_ui(
 	backend::vulkan::context& ctx,
 	renderer_frontend renderer,
 	graphic::image_atlas& image_atlas,
-	window_thread_dispatcher& window_dispatcher){
+	audio::audio_channel audio_channel,
+	sound::asset_group_handle default_sound_group){
 	game::ui::configure_collision_shape_editor_reference_images(image_atlas);
 
 	auto& ui_root = global::manager;
-	auto& res = ui_root.add_scene_resources("main");
+	auto& res = ui_root.add_scene_resources("main", audio_channel);
+	if(default_sound_group){
+		res.sound_manager.insert_or_assign(sound::default_asset_group_name, std::move(default_sound_group));
+	}
 	auto style_pal_prov = gui::cfg::builtin::make_styles(res);
 
 	const auto scene_add_rst = ui_root.add_scene<gui::cfg::builtin::example_scene, loose_group>("main", res, true, std::move(renderer));
@@ -211,8 +213,8 @@ ui_outputs build_main_ui(
 	auto& root = scene_add_rst.root_group;
 	style_pal_prov.add_to_scene(scene);
 
-	scene.enable_elem_async_task_post(true);
-	scene.drop_and_reset_communicate_async_task_queue_size(1);
+	scene.enable_forked_scene_tasks(true);
+	scene.reset_output_channels(output_channel::count);
 
 	gui::cfg::builtin::set_cursors(scene);
 
@@ -236,7 +238,7 @@ ui_outputs build_main_ui(
 
 	scene.resources().set_native_communicator<backend::glfw::communicator>(
 		ctx.window().get_handle(),
-		window_dispatcher);
+		scene.output_queue(output_channel::window_thread));
 	scene.get_communicator()->set_native_cursor_visibility(false);
 
 	auto e = scene.create<scaling_stack>();
@@ -312,8 +314,8 @@ ui_outputs build_main_ui(
 						slider->set_smooth_drag(true);
 						slider->bar_handle_extent = {40};
 						slider->set_drawer(style::spec::make_round_slider_style({
-							.handle_shape = assets::builtin::default_round_square_base,
-							.bar_shape = assets::builtin::default_round_square_base,
+							.handle_shape = assets::round_square::base(),
+							.bar_shape = assets::round_square::base(),
 							.handle_palette = style::pal::white,
 							.bar_palette = style::pal::pastel_gray.copy().mul_rgb(.7f),
 							.bar_back_palette = style::pal::pastel_gray.copy().mul_rgb(.2f),
@@ -361,25 +363,6 @@ ui_outputs build_main_ui(
 					"sliders", [&](scroll_adaptor<sequence>& pane){
 						sequence& s = pane.get_elem();
 						pane.set_style();
-
-						// util::post_elem_async_task(s, [](gui::sequence& seq){
-						// 	return elem_async_yield_task{
-						// 			seq,
-						// 			[](elem& e){
-						// 				log::debug({"Task"}, "begin: current thread: {}",
-						// 				             std::this_thread::get_id());
-						// 				std::this_thread::sleep_for(std::chrono::milliseconds(500));
-						// 				log::debug({"Task"}, "end: current thread: {}",
-						// 				             std::this_thread::get_id());
-						// 				return 114;
-						// 			},
-						// 			[](elem& e, int val){
-						// 				log::debug({"Task"}, "done: current thread: {} - {}",
-						// 				             std::this_thread::get_id(), val);
-						// 			}
-						// 		};
-						// });
-
 						s.set_expand_policy(layout::expand_policy::prefer);
 						s.template_cell.set_pending();
 						s.template_cell.pad = {16, 4};
@@ -571,9 +554,9 @@ ui_outputs build_main_ui(
 													interactivity = interactivity_flag::enabled;
 												}
 
-												events::op_afterwards on_click(
-													const events::click event,
-													std::span<elem* const> aboves) override{
+												void on_pointer_button(events::event_context& ctx, const events::pointer_button_event& event) override{
+													elem::on_pointer_button(ctx, event);
+													if(!ctx.is_target_or_bubble_phase()) return;
 													if(event.key.on_release()){
 														get_scene().create_overlay({
 																.extent = {
@@ -595,7 +578,7 @@ ui_outputs build_main_ui(
 																e.end_line().emplace_back<elem>();
 															});
 													}
-													return events::op_afterwards::intercepted;
+													ctx.consume(*this);
 												}
 											};
 											tooltip.emplace_back<dialog_creator>().cell().set_size({

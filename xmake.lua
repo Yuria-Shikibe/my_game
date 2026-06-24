@@ -29,6 +29,7 @@ option_end()
 if is_plat("windows") then
     set_runtimes(is_mode("debug") and "MDd" or "MD")
     add_cxxflags("/FS", {tools = {"cl"}})
+    add_cxflags("/bigobj", {tools = {"cl"}})
 else
     set_runtimes("c++_shared")
 end

@@ -16,6 +16,7 @@ import mo_yanxi.backend.vulkan.context;
 import mo_yanxi.backend.glfw.window;
 import mo_yanxi.backend.application_timer;
 import mo_yanxi.backend.vulkan.renderer;
+import mo_yanxi.backend.miniaudio.audio;
 
 import mo_yanxi.graphic.g2d;
 import mo_yanxi.graphic.image_atlas;
@@ -34,6 +35,7 @@ import mo_yanxi.gui.fx.instruction_extension;
 
 import mo_yanxi.gui.cfg.builtin.assets;
 import mo_yanxi.gui.image_regions;
+import mo_yanxi.gui.cfg.audio_assets;
 
 import mo_yanxi.font;
 import mo_yanxi.font.plat;
@@ -46,6 +48,7 @@ import mo_yanxi.react_flow.common;
 import mo_yanxi.react_flow;
 
 import mo_yanxi.core.platform;
+import mo_yanxi.audio;
 
 import mo_yanxi.game.profile.runtime;
 import mo_yanxi.gui.cfg.builtin.main_loop;
@@ -157,6 +160,8 @@ template <
 void app_run(
 	mo_yanxi::gui::cfg::builtin::main_loop_type& main_loop,
 	std::vector<mo_yanxi::vk::command_buffer>& compositor_cmds,
+	mo_yanxi::audio::audio_system& audio_system,
+	mo_yanxi::audio::audio_resource_manager& audio_resources,
 	AdvanceGame&& advance_game,
 	BeginGameRender&& begin_game_render,
 	WaitGameRender&& wait_game_render,
@@ -168,6 +173,7 @@ void app_run(
 	using profile_clock = std::chrono::steady_clock;
 
 	backend::application_timer timer{backend::application_timer<double>::get_default()};
+	std::vector<audio::audio_event> pending_audio_events{};
 
 	auto& current_focus = main_loop.get_scene();
 	log::info({"App"}, "entering main loop");
@@ -194,7 +200,7 @@ void app_run(
 		};
 		game_trace(std::format("frame {}: begin", current_frame));
 		ctx.window().poll_events();
-		main_loop.get_window_dispatcher().drain();
+		current_focus.consume_output(gui::output_channel::window_thread);
 		timer.fetch_time();
 		const auto frame_delta = timer.global_delta();
 		profile_metrics.delta_seconds = static_cast<double>(frame_delta);
@@ -203,6 +209,10 @@ void app_run(
 		gui::global::event_queue.push_frame_split(frame_delta);
 		std::invoke(advance_game, static_cast<double>(frame_delta));
 		record_profile_phase(profile_metrics.advance_game_ms);
+		pending_audio_events.clear();
+		audio_system.poll_events_into(pending_audio_events);
+		audio_resources.consume_audio_events(pending_audio_events);
+		audio_resources.maintain();
 		game_trace(std::format("frame {}: acquiring output", current_frame));
 		auto output_token = ctx.acquire_output_frame();
 		record_profile_phase(profile_metrics.acquire_ms);
@@ -228,18 +238,18 @@ void app_run(
 		record_profile_phase(profile_metrics.request_game_render_ms);
 		game_trace(std::format("frame {}: request game render end {}", current_frame, game_render_request));
 		game_trace(std::format("frame {}: permit burst begin", current_frame));
-		main_loop.get_window_dispatcher().drain();
+		current_focus.consume_output(gui::output_channel::window_thread);
 		main_loop.permit_burst();
 		record_profile_phase(profile_metrics.permit_burst_ms);
 		game_trace(std::format("frame {}: permit burst end", current_frame));
 		game_trace(std::format("frame {}: consume async queue begin", current_frame));
-		current_focus.get_output_communicate_async_task_queue(0).consume();
+		current_focus.consume_output(gui::output_channel::window_thread);
 		record_profile_phase(profile_metrics.consume_async_queue_ms);
 		game_trace(std::format("frame {}: consume async queue end", current_frame));
 
 		game_trace(std::format("frame {}: wait term begin", current_frame));
 		main_loop.wait_term();
-		main_loop.get_window_dispatcher().drain();
+		current_focus.consume_output(gui::output_channel::window_thread);
 		record_profile_phase(profile_metrics.wait_gui_ms);
 		game_trace(std::format("frame {}: wait term end", current_frame));
 		game_trace(std::format("frame {}: wait game render begin {}", current_frame, game_render_request));
@@ -282,7 +292,7 @@ void app_run(
 			}
 		}
 	}
-	main_loop.get_window_dispatcher().drain();
+	current_focus.consume_output(gui::output_channel::window_thread);
 }
 
 void prepare(
@@ -296,6 +306,7 @@ void prepare(
 
 	log::info({"GUI"}, "core initialize");
 	gui::global::initialize();
+	ctx.window().set_input_sink(&gui::global::event_queue);
 	gui::global::initialize_assets_manager(gui::global::manager.get_arena_id());
 	log::info({"GUI"}, "core initialize done");
 
@@ -530,6 +541,10 @@ void prepare(
 	}
 #pragma endregion
 
+	audio::audio_system audio_system{backend::miniaudio::make_audio_driver()};
+	audio::audio_resource_manager audio_resources{audio_system};
+	gui::cfg::default_ui_sound_assets default_audio_assets{};
+
 #pragma region SetupRenderGraph
 	log::info({"Compositor"}, "initialize");
 
@@ -691,16 +706,18 @@ void prepare(
 	auto init_fn = [&](gui::cfg::builtin::main_loop_type& loop) -> gui::cfg::builtin::main_loop_init_return_t {
 		gui::cfg::builtin::main_loop_init_return_t ret{};
 
+		default_audio_assets = gui::cfg::load_default_ui_sound_assets(audio_resources);
 		auto ui_providers = gui::cfg::builtin::build_main_ui(
 			loop.get_ctx(),
 			loop.get_renderer().create_frontend(),
 			image_atlas,
-			loop.get_window_dispatcher());
+			audio_system.register_channel(audio::channel_id_from_role(audio::channel_role::ui)),
+			default_audio_assets.group);
 		auto& scene = *ui_providers.scene_ptr;
 		ret.main_scene = ui_providers.scene_ptr;
 
 		static constexpr auto post_task = []<typename F>(gui::scene& scene, F&& fn){
-			scene.get_output_communicate_async_task_queue(0).post(std::forward<F>(fn));
+			(void)scene.post_output(gui::output_channel::window_thread, std::forward<F>(fn));
 		};
 
 		auto& bloom_scale = react_flow::attach(scene, react_flow::make_listener(
@@ -871,7 +888,7 @@ void prepare(
 		});
 	});
 
-	app_run(main_loop, post_process_cmds, [&](const double delta_seconds){
+	app_run(main_loop, post_process_cmds, audio_system, audio_resources, [&](const double delta_seconds){
 		if(const auto events = main_loop.unhandled_events.fetch()){
 			for(const auto event : *events){
 				main_loop.payload.game->handle_event(event);
@@ -899,6 +916,7 @@ void prepare(
 
 	gui::cfg::builtin::dispose_generated_shapes();
 	gui::global::terminate_assets_manager();
+	ctx.window().set_input_sink(nullptr);
 	gui::global::terminate();
 
 	image_atlas.request_stop();
