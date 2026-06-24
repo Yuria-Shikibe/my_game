@@ -919,11 +919,12 @@ inline void materialize_collision_shape_editor_part_polygon_edges(collision_shap
 		return;
 	}
 	const std::size_t edge_count = physics::collision_shape_editor_part_polygon_edge_count(part);
-	part.polygon_edges.clear();
-	part.polygon_edges.reserve(edge_count);
+	std::vector<collision_shape_editor_polygon_edge> materialized_edges{};
+	materialized_edges.reserve(edge_count);
 	for(std::size_t edge_index = 0u; edge_index != edge_count; ++edge_index){
-		part.polygon_edges.push_back(physics::collision_shape_editor_part_polygon_edge_at(part, edge_index));
+		materialized_edges.push_back(physics::collision_shape_editor_part_polygon_edge_at(part, edge_index));
 	}
+	part.polygon_edges = std::move(materialized_edges);
 	part.polygon_edges_explicit = true;
 }
 

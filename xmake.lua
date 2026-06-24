@@ -183,6 +183,7 @@ target("game_tests")
 
     add_deps("xrgui.default", "mo_yanxi.react_flow")
     add_ecs_entity_port_includes()
+    add_defines("MO_YANXI_GAME_ENABLE_EDITOR_TESTS")
     if has_config("enable_tests") then
         add_packages("gtest", "simdutf")
     end

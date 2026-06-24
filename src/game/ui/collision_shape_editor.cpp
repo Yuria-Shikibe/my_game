@@ -3988,6 +3988,9 @@ void editor_state::erase_selected(){
 					candidate.polygon_edges.begin() + static_cast<std::ptrdiff_t>(*cursor));
 			}
 		}
+		if(candidate.uses_explicit_polygon_edges()){
+			candidate.closed = candidate.ordered_polygon_vertices_for_export().has_value();
+		}
 		if(!candidate.payload_valid()){
 			last_error = "delete would make the polygon edge set invalid";
 			return;
@@ -4049,6 +4052,7 @@ void editor_state::erase_selected(){
 			}
 			candidate.convex_polygon.vertices = std::move(remaining_vertices);
 			candidate.polygon_edges = std::move(remaining_edges);
+			candidate.closed = candidate.ordered_polygon_vertices_for_export().has_value();
 		}else{
 			for(auto cursor = vertices.rbegin(); cursor != vertices.rend(); ++cursor){
 				if(*cursor >= candidate.convex_polygon.vertices.size()){
@@ -4200,6 +4204,9 @@ void editor_state::insert_vertex_at_cursor(const math::vec2 cursor){
 	collision::editor::materialize_part_polygon_edges(candidate);
 	candidate.convex_polygon.vertices.push_back(local_vertex);
 	collision::editor::snap_part_vertices_to_mirror_axes(candidate);
+	if(candidate.uses_explicit_polygon_edges()){
+		candidate.closed = candidate.ordered_polygon_vertices_for_export().has_value();
+	}
 	if(!candidate.payload_valid()){
 		last_error = "point insert would make the polygon graph invalid";
 		return;
@@ -4264,6 +4271,9 @@ void editor_state::connect_selected_vertices_as_edge(){
 	auto candidate = part;
 	collision::editor::materialize_part_polygon_edges(candidate);
 	candidate.polygon_edges.push_back({.first = first, .second = second});
+	if(candidate.uses_explicit_polygon_edges()){
+		candidate.closed = candidate.ordered_polygon_vertices_for_export().has_value();
+	}
 	if(!candidate.payload_valid()){
 		last_error = "edge creation would make the polygon edge set invalid";
 		return;
@@ -4301,6 +4311,46 @@ std::size_t make_object_selected_concave_polygon(editor_state& state){
 	return polygon;
 }
 
+std::size_t make_edit_selected_square(
+	editor_state& state,
+	const bool explicit_polygon_edges,
+	const bool closed){
+	state.document = {};
+	state.set_mode(editor_detail::editor_mode::edit);
+
+	const std::size_t polygon = state.document.add_shape(physics::shape_type::convex_polygon);
+	auto& part = state.document.parts[polygon];
+	part.convex_polygon.vertices = {
+		{-2.f, -1.f},
+		{2.f, -1.f},
+		{2.f, 1.f},
+		{-2.f, 1.f}
+	};
+	if(explicit_polygon_edges){
+		part.polygon_edges = closed
+			? std::vector<collision::editor::polygon_edge>{
+				{.first = 0u, .second = 1u},
+				{.first = 1u, .second = 2u},
+				{.first = 2u, .second = 3u},
+				{.first = 3u, .second = 0u}
+			}
+			: std::vector<collision::editor::polygon_edge>{
+				{.first = 0u, .second = 1u},
+				{.first = 1u, .second = 2u},
+				{.first = 2u, .second = 3u}
+			};
+		part.polygon_edges_explicit = true;
+	}else{
+		part.polygon_edges.clear();
+		part.polygon_edges_explicit = false;
+	}
+	part.closed = closed;
+
+	state.set_edit_vertex_selection(polygon, std::nullopt, {polygon}, {});
+	state.last_error.clear();
+	return polygon;
+}
+
 collision_shape_editor_polygon_operation_result polygon_operation_result_from_state(editor_state& state){
 	std::optional<std::size_t> selected_part{};
 	std::vector<std::size_t> selected_parts{};
@@ -4322,6 +4372,126 @@ collision_shape_editor_polygon_operation_result polygon_operation_result_from_st
 		.selected_parts = std::move(selected_parts),
 		.last_error = std::move(state.last_error)
 	};
+}
+
+collision_shape_editor_edit_operation_result edit_operation_result_from_state(
+	editor_state& state,
+	const bool probe_runtime_export){
+	std::vector<std::size_t> selected_parts{
+		state.edit_selected_part_indices().begin(),
+		state.edit_selected_part_indices().end()
+	};
+	std::vector<std::size_t> selected_vertices{
+		state.edit_selected_vertex_indices().begin(),
+		state.edit_selected_vertex_indices().end()
+	};
+	std::vector<std::size_t> selected_edges{
+		state.edit_selected_edge_indices().begin(),
+		state.edit_selected_edge_indices().end()
+	};
+	std::string runtime_export_error{};
+	if(probe_runtime_export){
+		try{
+			static_cast<void>(state.document.to_runtime_shape());
+		}catch(const std::exception& exception){
+			runtime_export_error = exception.what();
+		}
+	}
+	const bool has_open_polygon = state.document.has_open_polygon();
+	const bool has_non_convex_polygon = state.document.has_non_convex_polygon();
+	const bool has_self_intersecting_polygon = state.document.has_self_intersecting_polygon();
+
+	return collision_shape_editor_edit_operation_result{
+		.document = std::move(state.document),
+		.selected_part = state.edit_selected_part_index(),
+		.selected_parts = std::move(selected_parts),
+		.selected_vertex = state.edit_selected_vertex_index(),
+		.selected_vertices = std::move(selected_vertices),
+		.selected_edge = state.edit_selected_edge_index(),
+		.selected_edges = std::move(selected_edges),
+		.has_open_polygon = has_open_polygon,
+		.has_non_convex_polygon = has_non_convex_polygon,
+		.has_self_intersecting_polygon = has_self_intersecting_polygon,
+		.runtime_export_error = std::move(runtime_export_error),
+		.last_error = std::move(state.last_error)
+	};
+}
+
+collision_shape_editor_insert_point_result insert_point_result_from_state(
+	editor_state& state,
+	const bool probe_runtime_export){
+	std::vector<std::size_t> selected_vertices{
+		state.edit_selected_vertex_indices().begin(),
+		state.edit_selected_vertex_indices().end()
+	};
+	std::string runtime_export_error{};
+	if(probe_runtime_export){
+		try{
+			static_cast<void>(state.document.to_runtime_shape());
+		}catch(const std::exception& exception){
+			runtime_export_error = exception.what();
+		}
+	}
+	const std::string selected_text = state.selected_text();
+	const bool has_open_polygon = state.document.has_open_polygon();
+	const bool has_non_convex_polygon = state.document.has_non_convex_polygon();
+	const bool has_self_intersecting_polygon = state.document.has_self_intersecting_polygon();
+
+	return collision_shape_editor_insert_point_result{
+		.document = std::move(state.document),
+		.selected_vertex = state.edit_selected_vertex_index(),
+		.selected_vertices = std::move(selected_vertices),
+		.selected_text = selected_text,
+		.has_open_polygon = has_open_polygon,
+		.has_non_convex_polygon = has_non_convex_polygon,
+		.has_self_intersecting_polygon = has_self_intersecting_polygon,
+		.runtime_export_error = std::move(runtime_export_error),
+		.last_error = std::move(state.last_error)
+	};
+}
+
+collision_shape_editor_insert_point_result insert_closed_polygon_point_for_test(){
+	editor_state state{};
+	state.document = {};
+	state.set_mode(editor_detail::editor_mode::edit);
+
+	const std::size_t polygon = state.document.add_shape(physics::shape_type::convex_polygon);
+	auto& part = state.document.parts[polygon];
+	part.convex_polygon.vertices = {
+		{-2.f, -1.f},
+		{2.f, -1.f},
+		{2.f, 1.f},
+		{-2.f, 1.f}
+	};
+	part.polygon_edges.clear();
+	part.polygon_edges_explicit = false;
+	part.closed = true;
+
+	state.set_edit_vertex_selection(polygon, std::nullopt, {polygon}, {});
+	state.insert_vertex_at_cursor({0.f, -2.f});
+	return insert_point_result_from_state(state, false);
+}
+
+collision_shape_editor_insert_point_result add_midpoint_to_selected_polygon_edge_for_test(){
+	editor_state state{};
+	state.document = {};
+	state.set_mode(editor_detail::editor_mode::edit);
+
+	const std::size_t polygon = state.document.add_shape(physics::shape_type::convex_polygon);
+	auto& part = state.document.parts[polygon];
+	part.convex_polygon.vertices = {
+		{-2.f, -1.f},
+		{2.f, -1.f},
+		{2.f, 1.f},
+		{-2.f, 1.f}
+	};
+	part.polygon_edges.clear();
+	part.polygon_edges_explicit = false;
+	part.closed = true;
+
+	state.set_edit_edge_selection(polygon, 0u, {polygon}, {0u});
+	state.add_vertex_between_selected();
+	return insert_point_result_from_state(state, true);
 }
 
 collision_shape_editor_edge_connection_result connect_inserted_polygon_vertex_for_test(){
@@ -4358,6 +4528,42 @@ collision_shape_editor_edge_connection_result connect_inserted_polygon_vertex_fo
 	};
 }
 
+collision_shape_editor_edit_operation_result connect_open_polygon_closing_edge_for_test(){
+	editor_state state{};
+	const std::size_t polygon = make_edit_selected_square(state, true, false);
+
+	state.set_edit_vertex_selection(polygon, std::nullopt, {polygon}, {3u, 0u});
+	state.connect_selected_vertices_as_edge();
+	return edit_operation_result_from_state(state, true);
+}
+
+collision_shape_editor_edit_operation_result erase_selected_polygon_vertex_for_test(){
+	editor_state state{};
+	const std::size_t polygon = make_edit_selected_square(state, true, true);
+
+	state.set_edit_vertex_selection(polygon, 1u, {polygon}, {1u});
+	state.erase_selected();
+	return edit_operation_result_from_state(state, true);
+}
+
+collision_shape_editor_edit_operation_result erase_selected_polygon_edge_for_test(){
+	editor_state state{};
+	const std::size_t polygon = make_edit_selected_square(state, false, true);
+
+	state.set_edit_edge_selection(polygon, 1u, {polygon}, {1u});
+	state.erase_selected();
+	return edit_operation_result_from_state(state, true);
+}
+
+collision_shape_editor_edit_operation_result merge_selected_polygon_vertices_for_test(){
+	editor_state state{};
+	const std::size_t polygon = make_edit_selected_square(state, true, true);
+
+	state.set_edit_vertex_selection(polygon, 0u, {polygon}, {0u, 1u});
+	state.merge_selected_vertices(editor_detail::vertex_merge_mode::first);
+	return edit_operation_result_from_state(state, true);
+}
+
 collision_shape_editor_polygon_operation_result hull_object_selected_polygon_for_test(){
 	editor_state state{};
 	make_object_selected_concave_polygon(state);
@@ -4369,6 +4575,14 @@ collision_shape_editor_polygon_operation_result split_object_selected_polygon_fo
 	editor_state state{};
 	make_object_selected_concave_polygon(state);
 	state.split_selected_polygon_to_convex_parts();
+	return polygon_operation_result_from_state(state);
+}
+
+collision_shape_editor_polygon_operation_result cut_selected_polygon_between_vertices_for_test(){
+	editor_state state{};
+	const std::size_t polygon = make_edit_selected_square(state, false, true);
+	state.set_edit_vertex_selection(polygon, std::nullopt, {polygon}, {0u, 2u});
+	state.cut_selected_polygon();
 	return polygon_operation_result_from_state(state);
 }
 }
@@ -4480,6 +4694,18 @@ void editor_state::merge_selected_vertices(const editor_detail::vertex_merge_mod
 				.first = vertex_remap[edge.first],
 				.second = vertex_remap[edge.second]
 			};
+			if(remapped.first == remapped.second){
+				continue;
+			}
+			const bool duplicate = std::ranges::any_of(
+				merged_edges,
+				[remapped](const collision::editor::polygon_edge existing) noexcept{
+					return (existing.first == remapped.first && existing.second == remapped.second)
+						|| (existing.first == remapped.second && existing.second == remapped.first);
+				});
+			if(duplicate){
+				continue;
+			}
 			merged_edges.push_back(remapped);
 		}
 
@@ -4499,6 +4725,9 @@ void editor_state::merge_selected_vertices(const editor_detail::vertex_merge_mod
 		}
 	}
 	collision::editor::snap_part_vertices_to_mirror_axes(candidate);
+	if(candidate.uses_explicit_polygon_edges()){
+		candidate.closed = candidate.ordered_polygon_vertices_for_export().has_value();
+	}
 	if(!candidate.payload_valid()){
 		last_error = "merge would make the polygon invalid";
 		return;

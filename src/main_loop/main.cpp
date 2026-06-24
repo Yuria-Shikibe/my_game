@@ -341,6 +341,7 @@ void prepare(
 							attachment_config{VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL},
 							attachment_config{VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL},
 							attachment_config{VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL},
+							attachment_config{VK_FORMAT_R16_UINT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL},
 						}
 					},
 					.draw_pipe_config = graphic_pipeline_create_config{
@@ -426,6 +427,7 @@ void prepare(
 										{
 											{2, 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},
 											{3, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},
+											{4, 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},
 										}
 									},
 								}
@@ -574,6 +576,13 @@ void prepare(
 			}
 		});
 
+	auto& ui_input_back_coverage = manager.add_external_resource(compositor::resource_entity_external{
+			compositor::image_entity{}, compositor::resource_dependency{
+				.src_access = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+				.dst_access = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+			}
+		});
+
 	auto& input_background = manager.add_external_resource(game_renderer.make_output_resource());
 
 	auto& present_output = manager.add_external_resource(compositor::resource_entity_external{
@@ -632,15 +641,17 @@ void prepare(
 				{{3}, 2, compositor::no_slot},
 				{{4}, 3, compositor::no_slot},
 				{{5}, 4, compositor::no_slot},
+				{{6}, 5, compositor::no_slot},
 			}
 		});
-	pass_merge.data.set_sampler_at_binding(5, sampler_blit);
+	pass_merge.data.set_sampler_at_binding(6, sampler_blit);
 
 	pass_merge.id()->add_input({{ui_input_base, 0}});
 	pass_merge.id()->add_input({{ui_input_back, 1}});
-	pass_merge.id()->add_dep({pass_bloom.id(), 0, 2});
-	pass_merge.id()->add_input({{input_background, 3}});
-	pass_merge.id()->add_dep({pass_blur.id(), 0, 4});
+	pass_merge.id()->add_input({{ui_input_back_coverage, 2}});
+	pass_merge.id()->add_dep({pass_bloom.id(), 0, 3});
+	pass_merge.id()->add_input({{input_background, 4}});
+	pass_merge.id()->add_dep({pass_blur.id(), 0, 5});
 
 
 	auto pass_present = manager.add_pass<compositor::fullscreen_present_stage>(
@@ -658,6 +669,7 @@ void prepare(
 	game_renderer.resize({64, 64});
 	ui_input_base.resource = compositor::image_entity{.handle = renderer.get_blit_attachments()[0]};
 	ui_input_back.resource = compositor::image_entity{.handle = renderer.get_blit_attachments()[1]};
+	ui_input_back_coverage.resource = compositor::image_entity{.handle = renderer.get_blit_attachments()[3]};
 	input_background = game_renderer.make_output_resource();
 	manager.set_frame_count(ctx.output_image_count());
 	pass_present.data.set_output_format(ctx.output_image(0).format);
@@ -849,6 +861,7 @@ void prepare(
 
 			ui_input_base.resource = compositor::image_entity{.handle = r.get_blit_attachments()[0]};
 			ui_input_back.resource = compositor::image_entity{.handle = r.get_blit_attachments()[1]};
+			ui_input_back_coverage.resource = compositor::image_entity{.handle = r.get_blit_attachments()[3]};
 		}
 
 		game_renderer.with_render_lock([&]{
