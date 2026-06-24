@@ -14,7 +14,6 @@ Windows x64 上的 C++23 / Vulkan 游戏项目，使用 xmake 构建，主程序
 - Python 3.11 或更新版本，仅在重新生成 shader / icon 资源时需要
 - Slang `slangc`，仅在重新生成 shader 资源时需要
 
-建议在 **Developer PowerShell for VS 2022** 或 **x64 Native Tools Command Prompt for VS 2022** 中执行下面的命令，确保 `cl.exe` 在 `PATH` 中。
 
 ## 从零获取源码
 
