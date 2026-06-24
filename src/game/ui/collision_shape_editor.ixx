@@ -38,6 +38,8 @@ private:
 public:
 	[[nodiscard]] collision_shape_editor(gui::scene& scene, gui::elem* parent);
 
+	void set_default_appearance() override;
+
 	void on_display_state_changed(bool is_shown, bool is_scene_notified) override;
 
 	bool update(float delta_in_ticks) override;

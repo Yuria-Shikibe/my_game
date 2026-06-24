@@ -2197,6 +2197,8 @@ private:
 public:
 	[[nodiscard]] collision_shape_editor_viewport(gui::scene& scene, gui::elem* parent);
 
+	void set_default_appearance() override;
+
 	bool update(float delta_in_ticks) override;
 
 	void on_pointer_button(
@@ -2278,6 +2280,17 @@ private:
 
 namespace collision_shape_editor_prop{
 namespace{
+struct property_box_metrics{
+	static constexpr float title_height = 60.f;
+	static constexpr float row_height = 50;
+	static constexpr float name_width = 128.f;
+	static constexpr gui::layout::stated_size value_width{gui::layout::size_category::passive, 1.f};
+	static constexpr float check_value_width = row_height;
+	static constexpr float action_width = 72.f;
+	static constexpr float inner_pad = 4.f;
+	static constexpr float cell_pad = 2.f;
+};
+
 void assign_label_text(gui::direct_label* label, const std::string_view text){
 	if(label != nullptr){
 		label->set_tokenized_text(typesetting::tokenized_text{
@@ -2319,13 +2332,17 @@ struct numeric_property : gui::head_body_no_invariant{
 	input* input_{};
 	std::function<void(float)> on_value_changed{};
 
+	void set_default_appearance() override{
+		gui::head_body_no_invariant::set_default_appearance();
+		this->set_style_assume_synced();
+	}
+
 	[[nodiscard]] numeric_property(gui::scene& scene, gui::elem* parent)
 		: gui::head_body_no_invariant(scene, parent, gui::layout::layout_policy::vert_major){
-		this->set_style();
 		this->set_expand_policy(gui::layout::expand_policy::passive);
-		this->set_head_size(128.f);
-		this->set_body_size({gui::layout::size_category::passive, 1.f});
-		this->set_pad(4.f);
+		this->set_head_size(property_box_metrics::name_width);
+		this->set_body_size(property_box_metrics::value_width);
+		this->set_pad(property_box_metrics::inner_pad);
 
 		this->create_head([this](gui::direct_label& label){
 			label.set_style(gui::style::family_variant::base_only);
@@ -2390,13 +2407,17 @@ struct check_property : gui::head_body_no_invariant{
 	box* check_{};
 	std::function<void(bool)> on_value_changed{};
 
+	void set_default_appearance() override{
+		gui::head_body_no_invariant::set_default_appearance();
+		this->set_style_assume_synced();
+	}
+
 	[[nodiscard]] check_property(gui::scene& scene, gui::elem* parent)
 		: gui::head_body_no_invariant(scene, parent, gui::layout::layout_policy::vert_major){
-		this->set_style();
 		this->set_expand_policy(gui::layout::expand_policy::passive);
-		this->set_head_size(128.f);
-		this->set_body_size(34.f);
-		this->set_pad(4.f);
+		this->set_head_size(property_box_metrics::name_width);
+		this->set_body_size(property_box_metrics::check_value_width);
+		this->set_pad(property_box_metrics::inner_pad);
 
 		this->create_head([this](gui::direct_label& label){
 			label.set_style(gui::style::family_variant::base_only);
@@ -2436,13 +2457,17 @@ struct text_property : gui::head_body_no_invariant{
 	gui::direct_label* label_{};
 	gui::direct_label* value_{};
 
+	void set_default_appearance() override{
+		gui::head_body_no_invariant::set_default_appearance();
+		this->set_style_assume_synced();
+	}
+
 	[[nodiscard]] text_property(gui::scene& scene, gui::elem* parent)
 		: gui::head_body_no_invariant(scene, parent, gui::layout::layout_policy::vert_major){
-		this->set_style();
 		this->set_expand_policy(gui::layout::expand_policy::passive);
-		this->set_head_size(128.f);
-		this->set_body_size({gui::layout::size_category::passive, 1.f});
-		this->set_pad(4.f);
+		this->set_head_size(property_box_metrics::name_width);
+		this->set_body_size(property_box_metrics::value_width);
+		this->set_pad(property_box_metrics::inner_pad);
 
 		this->create_head([this](gui::direct_label& label){
 			label.set_style(gui::style::family_variant::base_only);
@@ -2480,11 +2505,16 @@ struct transform_properties : gui::sequence{
 	std::move_only_function<void(float)> on_y_changed{};
 	std::move_only_function<void(float)> on_rot_degrees_changed{};
 
+	void set_default_appearance() override{
+		gui::sequence::set_default_appearance();
+		this->set_style_assume_synced();
+	}
+
 	[[nodiscard]] transform_properties(gui::scene& scene, gui::elem* parent)
 		: gui::sequence(scene, parent, gui::layout::layout_policy::hori_major){
-		this->set_style();
 		this->set_expand_policy(gui::layout::expand_policy::resize_to_fit);
-		this->template_cell.set_size(64.f).set_pad({2.f, 2.f});
+		this->template_cell.set_size(property_box_metrics::row_height)
+			.set_pad({property_box_metrics::cell_pad, property_box_metrics::cell_pad});
 
 		auto x = this->emplace_back<numeric_property>();
 		auto y = this->emplace_back<numeric_property>();
@@ -2536,11 +2566,16 @@ struct mirror_properties : gui::sequence{
 	std::function<void(float)> on_origin_y_changed{};
 	std::function<void(float)> on_origin_rot_degrees_changed{};
 
+	void set_default_appearance() override{
+		gui::sequence::set_default_appearance();
+		this->set_style_assume_synced();
+	}
+
 	[[nodiscard]] mirror_properties(gui::scene& scene, gui::elem* parent)
 		: gui::sequence(scene, parent, gui::layout::layout_policy::hori_major){
-		this->set_style();
 		this->set_expand_policy(gui::layout::expand_policy::resize_to_fit);
-		this->template_cell.set_size(32.f).set_pad({2.f, 2.f});
+		this->template_cell.set_size(property_box_metrics::row_height)
+			.set_pad({property_box_metrics::cell_pad, property_box_metrics::cell_pad});
 
 		auto status = this->emplace_back<text_property>();
 		auto mirror_x = this->emplace_back<check_property>();
@@ -2618,11 +2653,16 @@ struct shape_properties_control : gui::sequence{
 	std::function<void(float)> on_primary_changed{};
 	std::function<void(float)> on_secondary_changed{};
 
+	void set_default_appearance() override{
+		gui::sequence::set_default_appearance();
+		this->set_style_assume_synced();
+	}
+
 	[[nodiscard]] shape_properties_control(gui::scene& scene, gui::elem* parent)
 		: gui::sequence(scene, parent, gui::layout::layout_policy::hori_major){
-		this->set_style();
 		this->set_expand_policy(gui::layout::expand_policy::resize_to_fit);
-		this->template_cell.set_size(32.f).set_pad({2.f, 2.f});
+		this->template_cell.set_size(property_box_metrics::row_height)
+			.set_pad({property_box_metrics::cell_pad, property_box_metrics::cell_pad});
 
 		auto primary = this->emplace_back<numeric_property>();
 		auto secondary = this->emplace_back<numeric_property>();
@@ -2711,11 +2751,15 @@ struct reference_image_actions : gui::sequence{
 	std::function<void()> on_choose{};
 	std::function<void()> on_clear{};
 
+	void set_default_appearance() override{
+		gui::sequence::set_default_appearance();
+		this->set_style_assume_synced();
+	}
+
 	[[nodiscard]] reference_image_actions(gui::scene& scene, gui::elem* parent)
 		: gui::sequence(scene, parent, gui::layout::layout_policy::vert_major){
-		this->set_style();
 		this->set_expand_policy(gui::layout::expand_policy::passive);
-		this->template_cell.set_pad({2.f, 2.f});
+		this->template_cell.set_pad({property_box_metrics::cell_pad, property_box_metrics::cell_pad});
 
 		auto choose = this->create_back([this](gui::button<gui::direct_label>& button){
 			setup_button(button, "Pick", [this]{
@@ -2732,18 +2776,23 @@ struct reference_image_actions : gui::sequence{
 				}
 			});
 		});
-		clear.cell().set_size(72.f);
+		clear.cell().set_size(property_box_metrics::action_width);
 	}
 };
 
 struct mode_panel : gui::sequence{
 	gui::direct_label* title_{};
 
+	void set_default_appearance() override{
+		gui::sequence::set_default_appearance();
+		this->set_style_assume_synced();
+	}
+
 	[[nodiscard]] mode_panel(gui::scene& scene, gui::elem* parent)
 		: gui::sequence(scene, parent, gui::layout::layout_policy::hori_major){
-		this->set_style();
 		this->set_expand_policy(gui::layout::expand_policy::resize_to_fit);
-		this->template_cell.set_pending().set_pad({2.f, 2.f});
+		this->template_cell.set_pending()
+			.set_pad({property_box_metrics::cell_pad, property_box_metrics::cell_pad});
 
 		auto title = this->create_back([this](gui::direct_label& label){
 			label.set_style(gui::style::family_variant::base_only);
@@ -2751,7 +2800,7 @@ struct mode_panel : gui::sequence{
 			label.text_entire_align = align::pos::center_left;
 			title_ = std::addressof(label);
 		});
-		title.cell().set_size(36.f);
+		title.cell().set_size(property_box_metrics::title_height);
 	}
 
 	void set_title(const std::string_view text) const{
@@ -2769,7 +2818,7 @@ struct object_mode_panel : mode_panel{
 		auto shape = this->emplace_back<text_property>();
 		auto transform = this->emplace_back<transform_properties>();
 		auto mirror = this->emplace_back<mirror_properties>();
-		shape.cell().set_size(60);
+		shape.cell().set_size(property_box_metrics::row_height);
 		shape_ = std::addressof(shape.elem());
 		transform_ = std::addressof(transform.elem());
 		mirror_ = std::addressof(mirror.elem());
@@ -2874,7 +2923,7 @@ struct reference_image_panel : mode_panel{
 		auto width = this->emplace_back<numeric_property>();
 		auto height = this->emplace_back<numeric_property>();
 		auto opacity = this->emplace_back<numeric_property>();
-		actions.cell().set_size(44.f);
+		actions.cell().set_size(property_box_metrics::row_height);
 		actions_ = std::addressof(actions.elem());
 		path_ = std::addressof(path.elem());
 		visible_ = std::addressof(visible.elem());
@@ -2935,10 +2984,14 @@ private:
 	origin_panel* origin_panel_{};
 
 public:
+	void set_default_appearance() override{
+		gui::flipper<mode_panel_count>::set_default_appearance();
+		this->set_style_assume_synced();
+	}
+
 	[[nodiscard]] panel(gui::scene& scene, gui::elem* parent)
 		: gui::flipper<mode_panel_count>(scene, parent){
 		this->interactivity = gui::interactivity_flag::children_only;
-		this->set_style();
 		this->set_expand_policy(gui::layout::expand_policy::resize_to_fit);
 		this->set_self_border(gui::border_t{}.set(8.f));
 
@@ -6213,8 +6266,12 @@ collision_shape_editor_viewport::collision_shape_editor_viewport(gui::scene& sce
 	: gui::viewport(scene, parent),
 	reference_image_path_node_{this},
 	document_path_node_{this}{
-	this->set_style(gui::style::family_variant::general_static);
 	camera.set_scale_range({0.0625f, 4.f});
+}
+
+void collision_shape_editor_viewport::set_default_appearance(){
+	gui::viewport::set_default_appearance();
+	this->set_style_assume_synced(gui::style::family_variant::general_static);
 }
 
 bool collision_shape_editor_viewport::update(const float delta_in_ticks){
@@ -7494,9 +7551,13 @@ void collision_shape_editor_viewport::draw_editor_content() const{
 	this->viewport_end();
 }
 
+void collision_shape_editor::set_default_appearance(){
+	gui::head_body::set_default_appearance();
+	this->set_style_assume_synced();
+}
+
 collision_shape_editor::collision_shape_editor(gui::scene& scene, gui::elem* parent)
 	: gui::head_body(scene, parent, gui::layout::layout_policy::vert_major){
-	this->set_style();
 	this->set_expand_policy(gui::layout::expand_policy::passive);
 	this->set_head_size(240.f);
 	this->set_body_size({gui::layout::size_category::passive, 1.f});
@@ -7697,10 +7758,11 @@ collision_shape_editor::collision_shape_editor(gui::scene& scene, gui::elem* par
 	properties_scroll.cell().region_align = align::pos::bottom_left;
 	properties_scroll.cell().unsaturate_cell_elem_align = align::pos::bottom_left;
 	properties_scroll.cell().margin = gui::border_t{.left = 8.f, .bottom = 8.f};
-	properties_scroll->set_style();
+	properties_scroll->set_style(gui::style::family_variant::solid);
+	properties_scroll->cursor_state_mut().maximum_duration = std::numeric_limits<float>::infinity();
 
 	auto& properties_sequence = properties_scroll.elem().get_elem();
-	// properties_sequence.set_style();
+	properties_sequence.set_style();
 	properties_sequence.set_layout_spec(gui::layout::layout_policy::hori_major);
 	properties_sequence.set_expand_policy(gui::layout::expand_policy::prefer);
 	properties_sequence.set_align_to_tail(true);

@@ -1,0 +1,25 @@
+shader_root = "./slangs"
+include_dir = ["../../../../external/xrgui/properties/assets_raw/shader/slangs/lib/"]
+
+[common_options]
+"-O3" = true
+"-g" = true
+"-fvk-use-gl-layout" = true
+"-fvk-use-entrypoint-name" = true
+"-emit-spirv-directly" = true
+"-floating-point-mode" = "fast"
+
+[[shaders]]
+file = "post_process/game.oit_blend.slang"
+
+[[shaders]]
+file = "post_process/game.oit_clear.slang"
+
+[[shaders]]
+file = "post_process/game.oit_emit.slang"
+
+[[shaders]]
+file = "post_process/game.ssao.slang"
+
+[[shaders]]
+file = "post_process/game.world_merge.slang"
