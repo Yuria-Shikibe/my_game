@@ -206,7 +206,7 @@ ui_outputs build_main_ui(
 	}
 	auto style_pal_prov = gui::cfg::builtin::make_styles(res);
 
-	const auto scene_add_rst = ui_root.add_scene<gui::cfg::builtin::example_scene, loose_group>("main", res, true, std::move(renderer));
+	const auto scene_add_rst = ui_root.add_scene<gui::cfg::builtin::example_scene, scaling_stack>("main", res, true, std::move(renderer));
 
 	// scene_add_rst.scene.resize(math::rect_ortho{tags::from_extent, {}, ctx.get_extent().width, ctx.get_extent().height}.as<float>());
 	auto& scene = scene_add_rst.scene;
@@ -241,10 +241,7 @@ ui_outputs build_main_ui(
 		scene.output_queue(output_channel::window_thread));
 	scene.get_communicator()->set_native_cursor_visibility(false);
 
-	auto e = scene.create<scaling_stack>();
-	// e->set_scaling({.5f, .5f});
-	e->set_fill_parent({true, true});
-	auto& mroot = static_cast<scaling_stack&>(root.insert(0, std::move(e)));
+	auto& mroot = root;
 
 	ui_outputs result{&scene};
 
